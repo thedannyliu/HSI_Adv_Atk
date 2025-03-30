@@ -1,0 +1,54 @@
+# 高光譜影像對抗攻擊配置文件
+
+GENERAL:
+  SEED: 42  # 隨機種子
+  LOG_INTERVAL: 10  # 日志間隔
+
+CUDA:
+  USE_CUDA: true  # 是否使用CUDA
+  CUDA_NUM: [0]  # CUDA設備ID
+
+DATASET:
+  ROOT: "/path/to/dataset"  # 資料集根路徑
+  Train_data: "./files/train.txt"  # 訓練數據文件列表
+  Val_data: "./files/test.txt"  # 驗證數據文件列表
+  NUM_CLASSES: 2  # 類別數量
+  MEAN: 0.0  # 輸入數據均值
+  STD: 1.0  # 輸入數據標準差
+
+MODEL:
+  C: 32  # 模型的通道數
+  IN_CHANNELS: 172  # 輸入通道數
+  USE_3D: false  # 是否使用3D卷積
+  USE_ATTENTION: false  # 是否使用注意力機制
+  ACTIVATION: "relu"  # 激活函數
+
+TEST:
+  CHECKPOINT: "./checkpoints/best_model.pth"  # 用於測試的檢查點
+  BATCH_SIZE: 4  # 測試批次大小
+  NUM_WORKERS: 4  # 數據加載線程數
+  RESULTS_PATH: "./output/test_results"  # 測試結果保存路徑
+
+ATTACK:
+  SAVE_DIR: "./output/adversarial_samples"  # 對抗樣本保存目錄
+  BATCH_SIZE: 1  # 攻擊批次大小
+  NUM_WORKERS: 4  # 數據加載線程數
+  
+  # 攻擊參數
+  EPS: 0.05  # 擾動大小
+  ALPHA: 0.005  # 步長 (PGD)
+  STEPS: 10  # 迭代步數 (PGD)
+  
+  # C&W 攻擊參數
+  C: 0.01  # 平衡係數
+  KAPPA: 0  # 置信度參數
+  LR: 0.01  # 學習率
+  
+  # DeepFool 攻擊參數
+  MAX_ITER: 50  # 最大迭代次數
+  OVERSHOOT: 0.02  # 過度參數
+
+  # 混合攻擊參數
+  HYBRID:
+    SPATIAL_WEIGHT: 0.5  # 空間域攻擊的權重 (0-1)
+    TARGET_BANDS: null   # 要攻擊的特定波段，null表示自動選擇重要波段

@@ -1,0 +1,33 @@
+CUDA:
+  USE_CUDA: True
+  CUDA_NUM: [0]
+
+DATASET:
+  ROOT: "/ssd5/HyperForensics/FastHyIn"
+  Val_data: "/home/komin/DFCN_Pytorch/test_cfg0.txt"
+  NUM_CLASSES: 2
+
+MODEL:
+  NAME: "HRNetV2"
+  C: 12
+  IN_CHANNELS: 172
+  USE_3D: True
+  USE_ATTENTION: False
+
+TEST:
+  BATCH_SIZE: 2
+  NUM_WORKERS: 4
+  CHECKPOINT: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/logs/weights/best.pth"
+
+GENERATE_ADV:
+  ATTACK_TYPE: "FGSM"          # 或 "PGD", "CW", "DeepFool"
+  EPS: 0.1                     # 擾動大小
+  ALPHA: 0.01                  # PGD的步長
+  STEPS: 40                    # PGD的步數
+  SAVE_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/adv_samples"
+  BATCH_SIZE: 16
+  NUM_WORKERS: 8
+  LOG_INTERVAL: 10
+  MEAN: [0.0]                  # 單一元素，會自動擴展到所有通道
+  STD: [1.0]                   # 單一元素，會自動擴展到所有通道
+  FLIST: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/adv_samples/flist_adv.txt" 

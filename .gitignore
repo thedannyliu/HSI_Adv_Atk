@@ -1,0 +1,14 @@
+**/__pycache__/
+logs/
+output/
+*.pth
+*.ckpt
+*.pt
+*.h5
+*.npy
+*.npz
+*.pkl
+*.json
+*.csv
+*.txt
+!requirements.txt
