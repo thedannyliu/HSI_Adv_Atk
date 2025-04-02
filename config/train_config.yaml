@@ -3,51 +3,59 @@ CUDA:
   CUDA_NUM: [3]     # 使用 GPU 3
 
 DATASET:
-  ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset"  # 修改為資料集根目錄
-  SPLIT_ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/dataset_split_txt"  # 資料集分割檔案的根目錄
-  CONFIGS:  # 資料集配置
+  ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset"
+  SPLIT_ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/dataset_split_txt"
+  NUM_CLASSES: 2
+  CONFIGS:
     - name: "Origin"
       train: "Origin/train.txt"
       val: "Origin/val.txt"
       test: "Origin/test.txt"
     - name: "config1"
-      train: "Config1/train.txt"
-      val: "Config1/val.txt"
-      test: "Config1/test.txt"
-    - name: "config2"
-      train: "Config2/train.txt"
-      val: "Config2/val.txt"
-      test: "Config2/test.txt"
-    - name: "config3"
-      train: "Config3/train.txt"
-      val: "Config3/val.txt"
-      test: "Config3/test.txt"
-    - name: "config4"
-      train: "Config4/train.txt"
-      val: "Config4/val.txt"
-      test: "Config4/test.txt"
-  NUM_CLASSES: 2
+      train: "config1/train.txt"
+      val: "config1/val.txt"
+      test: "config1/test.txt"
+  INFO_CSV: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/info_csv.csv"
 
 MODEL:
   NAME: "HRNetV2"
   C: 12
   IN_CHANNELS: 172
   USE_3D: True
-  USE_ATTENTION: False
+  USE_ATTENTION: True
+  INPUT_CHANNELS: 172
+  OUTPUT_CHANNELS: 1
+  PRETRAINED: false
 
 TRAIN:
   EPOCH_START: 0
   EPOCH_END: 100
-  BATCH_SIZE: 1  # 減少批次大小
-  LEARNING_RATE: 0.0005
-  NUM_WORKERS: 2  # 減少工作執行緒數量
-  LOG_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/logs/train_log" 
-  SAVE_WEIGHT_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/logs/weights"
-  SAVE_INTERVAL: 5
-  CHECKPOINT: ""
+  BATCH_SIZE: 4
+  LEARNING_RATE: 0.0001
+  WEIGHT_DECAY: 0.0001
+  NUM_WORKERS: 1
+  PIN_MEMORY: true
+  LOG_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/logs/training_log"
+  SAVE_WEIGHT_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/checkpoints"
+  CHECKPOINT: ""  # 如果要從某個檢查點繼續訓練，填寫路徑
+  SAVE_FREQ: 5  # 每多少個 epoch 保存一次
+  VAL_FREQ: 1   # 每多少個 epoch 驗證一次
+  LOSS:
+    NAME: "CrossEntropyLoss"
+    WEIGHTS: [1.0, 50.0]  # 大幅提高偽造樣本（類別1）的權重，因為偽造區域僅佔1-2%
+  OPTIMIZER:
+    NAME: "Adam"
+    BETA1: 0.9
+    BETA2: 0.999
+  SCHEDULER:
+    NAME: "ReduceLROnPlateau"
+    MODE: "max"
+    FACTOR: 0.1
+    PATIENCE: 5
+    VERBOSE: true
 
 TEST:
-  BATCH_SIZE: 1  # 減少批次大小
-  NUM_WORKERS: 2  # 減少工作執行緒數量
+  BATCH_SIZE: 4 
+  NUM_WORKERS: 1  
   CHECKPOINT: ""
   RESULTS_PATH: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/logs/test_result" 
