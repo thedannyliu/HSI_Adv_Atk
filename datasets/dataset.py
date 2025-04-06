@@ -3,6 +3,35 @@ import numpy as np
 import torch
 import pandas as pd
 from torch.utils.data import Dataset
+from PIL import Image # Used for potential image loading if needed, though DFCN reads npy
+import random as rn
+
+# Helper function to normalize HSI data to RGB for visualization (like in DFCN's checkPerformance)
+def normColor(R):
+    """Normalize HSI cube to an RGB image for visualization."""
+    # Example band selection for RGB visualization (adjust as needed)
+    # These might not be the best bands for your specific AVIRIS data
+    band_selection = [60, 27, 17] # Example: R, G, B bands indices (0-based)
+    if R.shape[2] < max(band_selection) + 1:
+        print(f"[WARN] normColor: Not enough bands ({R.shape[2]}) for selection {band_selection}. Using first 3 bands.")
+        band_selection = [0, 1, 2]
+        if R.shape[2] < 3:
+             band_selection = [0, 0, 0] # Fallback for single channel
+             
+    R_rgb = R[:, :, band_selection].astype(np.float32)
+    
+    # Normalize each channel independently (common practice)
+    for i in range(3):
+        min_val = np.min(R_rgb[:, :, i])
+        max_val = np.max(R_rgb[:, :, i])
+        if max_val > min_val:
+             R_rgb[:, :, i] = (R_rgb[:, :, i] - min_val) / (max_val - min_val)
+        else:
+             R_rgb[:, :, i] = 0 # Handle constant channel
+             
+    R_rgb = np.clip(R_rgb, 0, 1)
+    R_rgb = (R_rgb * 255).astype(np.uint8)
+    return R_rgb
 
 class forgeryHSIDataset(Dataset):
     """
@@ -19,6 +48,25 @@ class forgeryHSIDataset(Dataset):
         config (str): 配置類型，可為'Origin', 'config1', 'config2'等
     """
 
+    # 定義彩色映射表，用於 decode_target 方法 (與DFCN_Py/HRNetV2/dataset/dataset.py保持一致)
+    # 類別：真實(0)為棕色，偽造(1)為紫色
+    train_id_to_color = [(111, 74, 0), (81, 0, 81)]
+
+    @classmethod
+    def decode_target(cls, target):
+        """
+        將二進制標籤轉換為RGB彩色圖像，用於可視化。
+        參數：
+            target (np.ndarray): 形狀為(H, W)的標籤圖像，數值為0或1，分別代表真實和偽造。
+        
+        返回：
+            np.ndarray: 形狀為(H, W, 3)的RGB彩色圖像，用於可視化。
+        """
+        target = target.astype(np.uint8)
+        # 使用NumPy的廣播特性和色彩映射表實現快速轉換
+        rgb = np.array(cls.train_id_to_color)[target]
+        return rgb
+
     def __init__(self, root, flist, split='train', target_type='mask', transform=None, config='Origin'):
         self.root = root
         self.split = split
@@ -26,25 +74,53 @@ class forgeryHSIDataset(Dataset):
         self.transform = transform
         self.config = config
         
-        # 組合完整的文件列表路徑
-        self.flist = os.path.join(root, 'dataset_split_txt', flist)
+        # 检查flist是否为完整路径
+        if os.path.isabs(flist) and os.path.exists(flist):
+            self.flist = flist
+        else:
+            # 使用以前的逻辑：相对于root/dataset_split_txt的路径
+            self.flist = os.path.join(root, 'dataset_split_txt', flist)
         
-        # 讀取文件列表
+        # 读取文件列表和mask区域信息
+        self.img_paths = []
+        self.mask_areas = []
+        
         with open(self.flist, 'r') as f:
-            self.imgs = [line.strip() for line in f.readlines()]
+            for line in f:
+                parts = line.strip().split(',', 1)  # 只分割第一个逗号
+                
+                if len(parts) >= 1:
+                    img_path = parts[0]  # 例如 "config1/f090706t01p00r06_5_inpaint_result(1).npy"
+                    
+                    # 提取配置和文件名
+                    if '/' in img_path:
+                        config_dir, img_name = img_path.split('/', 1)
+                    else:
+                        config_dir = self.config
+                        img_name = img_path
+                    
+                    # 将mask区域信息作为整行的剩余部分
+                    mask_area = parts[1] if len(parts) > 1 else ""
+                    
+                    self.img_paths.append((config_dir, img_name))
+                    self.mask_areas.append(mask_area)
         
-        # 清理文件名
-        self.imgs = [img.split('/')[-1] for img in self.imgs]
+        # 使用项目根目录的info_csv.csv
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        info_csv_path = os.path.join(project_root, 'info_csv.csv')
+        try:
+            self.info_df = pd.read_csv(info_csv_path)
+            # 将 'sam' 列转换为字符串类型
+            self.info_df['sam'] = self.info_df['sam'].astype(str)
+            print(f"[INFO] 成功加载 info_csv.csv，共 {len(self.info_df)} 行")
+        except Exception as e:
+            print(f"[WARNING] 加载 info_csv.csv 出错: {str(e)}，将使用空的 DataFrame")
+            self.info_df = pd.DataFrame(columns=['sam', 'mask_area'])
         
-        # 讀取 info_csv，確保 'sam' 列為字符串類型
-        self.info_df = pd.read_csv(os.path.join(root, 'info_csv.csv'))
-        # 將 'sam' 列轉換為字符串類型
-        self.info_df['sam'] = self.info_df['sam'].astype(str)
-        
-        print(f"[INFO] 載入 {config} 數據集，共 {len(self.imgs)} 個樣本")
+        print(f"[INFO] 载入 {split} 数据集，共 {len(self.img_paths)} 个样本")
 
     def __len__(self):
-        return len(self.imgs)
+        return len(self.img_paths)
 
     def get_mask_area(self, img_name):
         """從 info_csv 中獲取對應的 mask_area"""
@@ -106,60 +182,111 @@ class forgeryHSIDataset(Dataset):
             return None
 
     def __getitem__(self, idx):
-        # 取得影像路徑
-        img_name = self.imgs[idx]
+        # 获取图像路径和配置
+        config_dir, img_name = self.img_paths[idx]
+        mask_area = self.mask_areas[idx]
         
-        # 根據配置類型決定資料路徑
-        if self.config == 'Origin':
+        # 构建完整的图像路径
+        if config_dir == 'Origin':
             img_path = os.path.join(self.root, 'Origin', img_name)
-        elif self.config == 'config1':
-            img_path = os.path.join(self.root, 'ADMM_ADAM', 'config1', img_name)
         else:
-            img_path = os.path.join(self.root, 'ADMM_ADAM', self.config, img_name)
+            # 避免重复的ADMM_ADAM路径
+            if 'ADMM_ADAM' in self.root:
+                img_path = os.path.join(self.root, config_dir, img_name)
+            else:
+                img_path = os.path.join(self.root, 'ADMM_ADAM', config_dir, img_name)
 
-        # 檢查檔案是否存在
+        # 检查文件是否存在
         if not os.path.exists(img_path):
-            raise FileNotFoundError(f"找不到檔案：{img_path}")
+            raise FileNotFoundError(f"找不到文件：{img_path}")
 
-        # 讀取影像 => shape = [256, 256, 172]
+        # 读取图像 => shape = [256, 256, 172]
         try:
-            # 使用 numpy 的 load 函數讀取 .npy 文件
+            # 使用 numpy 的 load 函数读取 .npy 文件
             if img_path.endswith('.npy'):
                 image = np.load(img_path, allow_pickle=True)
-            # 使用 fromfile 讀取二進制文件
+            # 使用 fromfile 读取二进制文件
             else:
                 try:
                     image = np.fromfile(img_path, dtype=np.float32).reshape(256, 256, 172)
                 except:
-                    # 嘗試使用不同的數據類型
+                    # 尝试使用不同的数据类型
                     image = np.fromfile(img_path, dtype=np.float64).reshape(256, 256, 172)
                     image = image.astype(np.float32)
             
-            image = np.ascontiguousarray(image)  # 確保記憶體連續
+            image = np.ascontiguousarray(image)  # 确保内存连续
         except Exception as e:
-            print(f"讀取檔案時發生錯誤 {img_path}: {str(e)}")
+            print(f"读取文件时发生错误 {img_path}: {str(e)}")
             raise
         
         if image.shape != (256, 256, 172):
             raise ValueError(f"{img_path} has shape {image.shape} != (256, 256, 172).")
 
-        # 轉置為 [Bands, H, W] => (172, 256, 256)
+        # 转置为 [Bands, H, W] => (172, 256, 256)
         image = image.transpose(2, 0, 1)
 
-        # 建立標籤 (H, W) = (256, 256)
+        # 创建标签 (H, W) = (256, 256)
         trg = np.zeros((256, 256), dtype=np.uint8)
         
-        # 如果不是原始圖片，則根據 mask_area 生成標籤
-        if self.config != 'Origin':
-            mask_area = self.get_mask_area(img_name)
-            if mask_area:
+        # 如果不是原始图片，则根据 mask_area 生成标签
+        if config_dir != 'Origin' and mask_area:
+            try:
+                parts = mask_area.split(',')
+                if len(parts) >= 2:
+                    y_ranges = parts[0].strip()
+                    x_ranges = parts[1].strip()
+                    
+                    # 处理多个y范围（用分号分隔）
+                    for y_range in y_ranges.split(';'):
+                        if ':' in y_range:
+                            y_parts = y_range.split(':')
+                            y1 = int(y_parts[0]) if y_parts[0].strip() else 0
+                            y2 = int(y_parts[1]) if y_parts[1].strip() else 256
+                        else:
+                            if y_range.strip():
+                                y1 = int(y_range.strip())
+                                y2 = y1 + 1
+                            else:
+                                continue
+                        
+                        # 处理多个x范围（用分号分隔）
+                        for x_range in x_ranges.split(';'):
+                            if ':' in x_range:
+                                x_parts = x_range.split(':')
+                                x1 = int(x_parts[0]) if x_parts[0].strip() else 0
+                                x2 = int(x_parts[1]) if x_parts[1].strip() else 256
+                            else:
+                                if x_range.strip():
+                                    x1 = int(x_range.strip())
+                                    x2 = x1 + 1
+                                else:
+                                    continue
+                            
+                            # 确保坐标在有效范围内
+                            y1 = max(0, min(y1, 255))
+                            y2 = max(1, min(y2, 256))
+                            x1 = max(0, min(x1, 255))
+                            x2 = max(1, min(x2, 256))
+                            
+                            trg[y1:y2, x1:x2] = 1  # 将伪造区域标记为 1
+            except Exception as e:
+                print(f"处理 mask_area 时发生错误 {mask_area}: {str(e)}")
+                # 如果处理失败但有mask_area，将整个图像标记为伪造
+                if mask_area:
+                    trg = np.ones((256, 256), dtype=np.uint8)
+                    print(f"将 {img_name} 全图标记为伪造（处理mask_area失败）")
+        elif config_dir != 'Origin' and not mask_area:
+            # 尝试从info_csv.csv获取mask_area
+            mask_area_from_csv = self.get_mask_area(img_name)
+            if mask_area_from_csv:
                 try:
-                    parts = mask_area.replace('"', '').split(',')
+                    # 处理从CSV获取的mask_area（类似上面的逻辑）
+                    parts = mask_area_from_csv.replace('"', '').split(',')
                     if len(parts) >= 2:
                         y_range = parts[0].strip()
                         x_range = parts[1].strip()
                         
-                        # 處理 y 座標
+                        # 处理 y 坐标
                         if ':' in y_range:
                             y_parts = y_range.split(':')
                             y1 = int(y_parts[0]) if y_parts[0].strip() else 0
@@ -167,7 +294,7 @@ class forgeryHSIDataset(Dataset):
                         else:
                             y1, y2 = 0, 256
                         
-                        # 處理 x 座標
+                        # 处理 x 坐标
                         if ':' in x_range:
                             x_parts = x_range.split(':')
                             x1 = int(x_parts[0]) if x_parts[0].strip() else 0
@@ -175,35 +302,32 @@ class forgeryHSIDataset(Dataset):
                         else:
                             x1, x2 = 0, 256
                         
-                        # 確保座標在有效範圍內
+                        # 确保坐标在有效范围内
                         y1 = max(0, min(y1, 255))
                         y2 = max(1, min(y2, 256))
                         x1 = max(0, min(x1, 255))
                         x2 = max(1, min(x2, 256))
                         
-                        trg[y1:y2, x1:x2] = 1  # 將偽造區域標記為 1
-                        
-                        # 只在 debug 模式下或每 100 次打印一次標籤統計
-                        if idx % 100 == 0:
-                            nonzero_count = np.count_nonzero(trg)
-                            total_pixels = trg.size
-                            print(f"樣本 {idx}: 圖像 {img_name} 的標籤統計: 偽造像素 {nonzero_count}/{total_pixels} ({nonzero_count/total_pixels*100:.2f}%)")
+                        trg[y1:y2, x1:x2] = 1  # 将伪造区域标记为 1
+                    print(f"使用从CSV获取的mask_area: {mask_area_from_csv}")
                 except Exception as e:
-                    print(f"處理 mask_area 時發生錯誤 {mask_area}: {str(e)}")
-                    # 如果處理失敗，使用全圖標籤
+                    print(f"处理CSV中的mask_area时发生错误: {str(e)}")
                     trg = np.ones((256, 256), dtype=np.uint8)
-                    print(f"將 {img_name} 全圖標記為偽造")
             else:
-                # 如果找不到 mask_area，將整個圖像標記為偽造
-                print(f"找不到 {img_name} 的 mask_area，將全圖標記為偽造")
+                # 如果找不到mask_area，将整个图像标记为伪造
                 trg = np.ones((256, 256), dtype=np.uint8)
+                print(f"找不到 {img_name} 的mask_area信息，将全图标记为伪造")
 
-        # 如果有指定 transform，則應能處理 (image, trg)
+        # 如果有指定 transform，则应能处理 (image, trg)
         if self.transform:
             image, trg = self.transform(image, trg)
 
-        # 轉為 Tensor，確保使用 float32 型別
+        # 转为 Tensor，确保使用 float32 类型
         image = torch.from_numpy(image.astype(np.float32))
         trg = torch.from_numpy(trg)
-
-        return image, trg, img_name 
+        
+        # 为了与训练循环保持一致，添加一个band label（类似DFCN中的band regularization）
+        # 这里简单用一个全零向量代替，实际应根据需求设定
+        band_label = torch.zeros(172, dtype=torch.float32)
+        
+        return image, trg, band_label 
