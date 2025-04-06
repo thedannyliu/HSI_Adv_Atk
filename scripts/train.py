@@ -1,441 +1,435 @@
-import os
-import sys
-import logging
-from datetime import datetime
-# 添加專案根目錄到Python路徑
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, ConcatDataset
-import argparse
-import numpy as np
-import json
-import pandas as pd
-import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from tqdm import tqdm
-import yaml
-from pathlib import Path
 import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+import numpy as np
+import os
+import argparse
+import yaml
+from tqdm import tqdm, trange # Use trange for epoch loop
+import time
+import sys
+from collections import OrderedDict
+import random
 
-from config import get_cfg_defaults
-from datasets import forgeryHSIDataset
-from models.hrnet import HRNetV2
-from metrics import SegMetrics
-from utils import set_random_seed, save_checkpoint, load_checkpoint, get_datetime_str
-from utils import DummyTransform, PairCompose, RandomFlip
-from utils.metrics import calculate_miou, calculate_accuracy
+# Multi-GPU and SyncBatchNorm Support (Ensure sync_batchnorm is installed)
+try:
+    from sync_batchnorm import convert_model, DataParallelWithCallback
+    sync_bn_avail = True
+except ImportError:
+    print("[WARN] sync_batchnorm not found. Multi-GPU SyncBatchNorm disabled. Falling back to nn.DataParallel.")
+    sync_bn_avail = False
+    # Use standard DataParallel as fallback
+    from torch.nn import DataParallel as DataParallelWithCallback 
+    # convert_model equivalent (does nothing if not using sync_bn)
+    def convert_model(model):
+        return model 
 
+# Add project root to path for imports
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
 
-def setup_logger(log_dir, exp_name):
-    """
-    設置日誌記錄器
-    
-    Args:
-        log_dir: 日誌目錄
-        exp_name: 實驗名稱
-    """
-    # 創建日誌目錄
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # 設置日誌文件名
-    log_file = os.path.join(log_dir, f"{exp_name}.log")
-    
-    # 配置日誌記錄器
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    
-    return logging.getLogger(__name__)
+# Local imports (relative to scripts/)
+from datasets.dataset import forgeryHSIDataset, normColor # Using the new dataset loader
+from models.hrnet import HRNetV2 # Using the modified HRNetV2 model
+from config.default import CfgNode # 從我們的default.py導入CfgNode
+from utils.metrics import SegMetrics # Using the DFCN metrics class
+from scripts.performance_eval import checkPerformance, load_config_yaml # Import validation function and YAML loader
 
+# --- Loss Functions (Copied/Adapted from DFCN train.py) ---
+class DiceBCELoss(nn.Module):
+    # As defined in DFCN train.py
+    def __init__(self, weight=None, size_average=True):
+        super(DiceBCELoss, self).__init__()
+    def forward(self, inputs, targets, smooth=1):
+        inputs = F.sigmoid(inputs)
+        inputs = inputs.view(-1)
+        targets = targets.view(-1).float() # Ensure target is float for calculations
+        intersection = (inputs * targets).sum()
+        dice_loss = 1 - (2. * intersection + smooth) / (inputs.sum() + targets.sum() + smooth)
+        BCE = F.binary_cross_entropy(inputs, targets, reduction='mean')
+        Dice_BCE = BCE + dice_loss
+        return Dice_BCE
 
-def load_config(config_path):
-    """載入配置文件"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+class IoULoss(nn.Module):
+    # As defined in DFCN train.py
+    def __init__(self, weight=None, size_average=True):
+        super(IoULoss, self).__init__()
+    def forward(self, inputs, targets, smooth=1):
+        inputs = F.sigmoid(inputs)
+        inputs = inputs.view(-1)
+        targets = targets.view(-1).float()
+        intersection = (inputs * targets).sum()
+        total = (inputs + targets).sum()
+        union = total - intersection
+        IoU = (intersection + smooth) / (union + smooth)
+        return 1 - IoU
 
+# Note: BoundaryLoss is complex and wasn't used in DFCN's main loss calculation, 
+# so it's omitted here for simplicity unless specifically requested.
 
-def create_dataset(cfg, split='train', config_name=None):
-    """創建數據集"""
-    if config_name is None:
-        # 如果沒有指定配置，使用所有配置
-        datasets = []
-        for config in cfg['DATASET']['CONFIGS']:
-            dataset = forgeryHSIDataset(
-                root=cfg['DATASET']['ROOT'],
-                flist=config[split],
-                split=split,
-                config=config['name']
-            )
-            datasets.append(dataset)
-        return ConcatDataset(datasets)
-    else:
-        # 使用指定的配置
-        config = next((c for c in cfg['DATASET']['CONFIGS'] if c['name'] == config_name), None)
-        if config is None:
-            raise ValueError(f"找不到配置：{config_name}")
-        return forgeryHSIDataset(
-            root=cfg['DATASET']['ROOT'],
-            flist=config[split],
-            split=split,
-            config=config_name
-        )
-
-
-def train_one_epoch(model, train_loader, criterion, optimizer, device, logger):
-    """訓練一個 epoch"""
-    model.train()
-    total_loss = 0
-    total_miou = 0
-    total_acc = 0
-    
-    # 用於監控預測分佈
-    pred_ones_percentage = 0
-    batch_count = 0
-    
-    pbar = tqdm(train_loader, desc='Training')
-    for batch_idx, (images, targets, _) in enumerate(pbar):
-        images = images.to(device)
-        targets = targets.to(device).long()  # 確保 targets 是 long 類型
-        
-        optimizer.zero_grad()
-        outputs = model(images)
-        
-        # 處理模型輸出可能是 tuple 的情況
-        if isinstance(outputs, tuple):
-            outputs = outputs[0]  # 取第一個輸出
-        
-        # 檢查輸出形狀
-        if outputs.dim() == 4:
-            if outputs.size(1) == 2:  # (B, 2, H, W) 形式，即多類別分類
-                loss = criterion(outputs, targets)
-                # 使用 softmax 獲取概率，然後取 argmax 獲取預測類別
-                probs = F.softmax(outputs, dim=1)
-                pred = torch.argmax(probs, dim=1)
-            else:  # (B, 1, H, W) 形式，即二元分類
-                outputs = outputs.squeeze(1)  # 變為 (B, H, W)
-                loss = criterion(outputs, targets)
-                # 使用 sigmoid 獲取概率，然後閾值處理
-                pred = (torch.sigmoid(outputs) > 0.5).long()
-        else:
-            # 單通道輸出
-            loss = criterion(outputs, targets)
-            pred = (outputs > 0).long()
-        
-        loss.backward()
-        optimizer.step()
-        
-        # 監控預測中 1 的比例
-        ones_percentage = pred.float().mean().item() * 100
-        pred_ones_percentage += ones_percentage
-        batch_count += 1
-        
-        # 計算指標 - 需確保 pred 和 targets 都是浮點型
-        miou = calculate_miou(pred.float(), targets.float())
-        acc = calculate_accuracy(pred.float(), targets.float())
-        
-        total_loss += loss.item()
-        total_miou += miou
-        total_acc += acc
-        
-        # 定期打印預測分佈
-        if batch_idx % 20 == 0:
-            target_ones = targets.float().mean().item() * 100
-            logger.info(f"Batch {batch_idx} - 標籤中1的比例: {target_ones:.2f}%, 預測中1的比例: {ones_percentage:.2f}%")
-        
-        # 更新進度條
-        pbar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'miou': f'{miou:.4f}',
-            'acc': f'{acc:.4f}',
-            'pred1%': f'{ones_percentage:.2f}%'
-        })
-    
-    # 計算平均值
-    avg_loss = total_loss / len(train_loader)
-    avg_miou = total_miou / len(train_loader)
-    avg_acc = total_acc / len(train_loader)
-    avg_pred_ones = pred_ones_percentage / batch_count
-    
-    logger.info(f"Epoch Training - Loss: {avg_loss:.4f}, mIoU: {avg_miou:.4f}, Acc: {avg_acc:.4f}, Avg Pred 1%: {avg_pred_ones:.2f}%")
-    return avg_loss, avg_miou, avg_acc
-
-
-def validate(model, val_loader, criterion, device, logger):
-    """驗證模型"""
-    model.eval()
-    total_loss = 0
-    total_miou = 0
-    total_acc = 0
-    
-    # 用於監控預測分佈
-    pred_ones_percentage = 0
-    batch_count = 0
-    
-    with torch.no_grad():
-        pbar = tqdm(val_loader, desc='Validating')
-        for batch_idx, (images, targets, _) in enumerate(pbar):
-            images = images.to(device)
-            targets = targets.to(device).long()  # 確保 targets 是 long 類型
-            
-            outputs = model(images)
-            
-            # 處理模型輸出可能是 tuple 的情況
-            if isinstance(outputs, tuple):
-                outputs = outputs[0]  # 取第一個輸出
-            
-            # 檢查輸出形狀
-            if outputs.dim() == 4:
-                if outputs.size(1) == 2:  # (B, 2, H, W) 形式，即多類別分類
-                    loss = criterion(outputs, targets)
-                    # 使用 softmax 獲取概率，然後取 argmax 獲取預測類別
-                    probs = F.softmax(outputs, dim=1)
-                    pred = torch.argmax(probs, dim=1)
-                else:  # (B, 1, H, W) 形式，即二元分類
-                    outputs = outputs.squeeze(1)  # 變為 (B, H, W)
-                    loss = criterion(outputs, targets)
-                    # 使用 sigmoid 獲取概率，然後閾值處理
-                    pred = (torch.sigmoid(outputs) > 0.5).long()
-            else:
-                # 單通道輸出
-                loss = criterion(outputs, targets)
-                pred = (outputs > 0).long()
-            
-            # 監控預測中 1 的比例
-            ones_percentage = pred.float().mean().item() * 100
-            pred_ones_percentage += ones_percentage
-            batch_count += 1
-            
-            # 計算指標 - 需確保 pred 和 targets 都是浮點型
-            miou = calculate_miou(pred.float(), targets.float())
-            acc = calculate_accuracy(pred.float(), targets.float())
-            
-            total_loss += loss.item()
-            total_miou += miou
-            total_acc += acc
-            
-            # 更新進度條
-            pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'miou': f'{miou:.4f}',
-                'acc': f'{acc:.4f}',
-                'pred1%': f'{ones_percentage:.2f}%'
-            })
-    
-    avg_loss = total_loss / len(val_loader)
-    avg_miou = total_miou / len(val_loader)
-    avg_acc = total_acc / len(val_loader)
-    avg_pred_ones = pred_ones_percentage / batch_count
-    
-    logger.info(f"Validation - Loss: {avg_loss:.4f}, mIoU: {avg_miou:.4f}, Acc: {avg_acc:.4f}, Avg Pred 1%: {avg_pred_ones:.2f}%")
-    return avg_loss, avg_miou, avg_acc
-
-
+# --- Main Training Function --- 
 def main(args):
-    # 讀取配置
-    cfg = get_cfg_defaults()
-    if args.config_path:
-        cfg.merge_from_file(args.config_path)
-    
-    # 如果指定了配置，則只使用指定的配置
-    if args.configs:
-        # 確保始終包含 Origin 配置（用於驗證）
-        selected_configs = ["Origin"] + [c for c in args.configs if c != "Origin"]
-        # 過濾配置列表，只保留選定的配置
-        cfg.DATASET.CONFIGS = [c for c in cfg.DATASET.CONFIGS if c["name"] in selected_configs]
-        print(f"[INFO] 使用選定的配置: {', '.join(selected_configs)}")
-    
-    cfg.freeze()
+    # Load Configuration from YAML
+    try:
+        print(f"[INFO] Attempting to load config from: {args.config_path}")
+        cfg = load_config_yaml(args.config_path)
+    except FileNotFoundError as e:
+        print(e)
+        sys.exit(1)
+    except Exception as e:
+        print(f"[ERROR] Failed to load or parse config file {args.config_path}: {str(e)}")
+        # Print the full traceback for debugging
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
-    # 設置設備
-    if cfg.CUDA.USE_CUDA and torch.cuda.is_available():
-        device_ids = cfg.CUDA.CUDA_NUM
-        device_str = f"cuda:{device_ids[0]}"
-        print(f"[INFO] 使用 GPU {device_ids[0]} ({torch.cuda.get_device_name(device_ids[0])})")
+    # Setup Device(s)
+    use_cuda = cfg.CUDA.USE_CUDA and torch.cuda.is_available()
+    gpu_ids = cfg.CUDA.CUDA_NUM
+    if use_cuda:
+        if not gpu_ids:
+            print("[WARN] USE_CUDA is True, but CUDA.CUDA_NUM is empty. Using default GPU 0.")
+            gpu_ids = [0]
+        base_device = torch.device(f"cuda:{gpu_ids[0]}")
+        torch.cuda.set_device(base_device) # Set default CUDA device
+        print(f"[INFO] Using CUDA. Primary GPU: {gpu_ids[0]}. Available GPUs: {torch.cuda.device_count()}")
+        print(f"[INFO] Training will use GPU IDs: {gpu_ids}")
     else:
-        device_str = 'cpu'
-        print("[WARNING] 使用 CPU")
-    device = torch.device(device_str)
-    print(f"[INFO] 使用設備: {device_str}")
-    set_random_seed(cfg.GENERAL.SEED)
+        base_device = torch.device("cpu")
+        print("[INFO] Using CPU")
 
-    # 創建日誌和模型保存目錄
-    os.makedirs(cfg.TRAIN.LOG_PATH, exist_ok=True)
-    os.makedirs(cfg.TRAIN.SAVE_WEIGHT_PATH, exist_ok=True)
+    # Set Random Seed
+    seed = cfg.GENERAL.SEED
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed) # Seed python's random module used in dataset
+    if use_cuda:
+        torch.cuda.manual_seed_all(seed)
+        # Consider adding these for full reproducibility, but they can slow down training
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
 
-    # 訓練集使用數據增強
-    train_transform = PairCompose([
-        RandomFlip(p=0.5)
-    ])
-    
-    # 創建所有配置的訓練數據集
-    train_datasets = []
-    for config in cfg.DATASET.CONFIGS:
-        dataset = create_dataset(cfg, 'train', config["name"])
-        train_datasets.append(dataset)
-        print(f"[INFO] 添加訓練數據集: {config['name']}, 大小: {len(dataset)}")
-    
-    # 合併所有訓練數據集
-    train_dataset = ConcatDataset(train_datasets)
+    # Prepare Dataset & DataLoader
+    train_list_path = os.path.join(project_root, cfg.DATASET.Train_data.replace("../", ""))
+    print(f"[INFO] Loading training data list from: {train_list_path}")
+    # Transforms are mostly handled inside dataset's __getitem__ based on DFCN logic
+    train_dataset = forgeryHSIDataset(
+        root=cfg.DATASET.ROOT, 
+        flist=train_list_path,  # 直接传入完整路径
+        split='train'
+    )
+    if len(train_dataset) == 0:
+         print("[ERROR] Training dataset is empty. Aborting.")
+         sys.exit(1)
+         
     train_loader = DataLoader(
         train_dataset,
-        batch_size=cfg.TRAIN.BATCH_SIZE,
+        batch_size=cfg.TRAIN.BATCH_SIZE * len(gpu_ids) if use_cuda else cfg.TRAIN.BATCH_SIZE, # Total batch size across GPUs
         shuffle=True,
         num_workers=cfg.TRAIN.NUM_WORKERS,
-        pin_memory=cfg.TRAIN.PIN_MEMORY
+        pin_memory=cfg.TRAIN.PIN_MEMORY, 
+        drop_last=True
     )
+    print(f"[INFO] Training dataset size: {len(train_dataset)}, Loader batch size: {cfg.TRAIN.BATCH_SIZE * len(gpu_ids) if use_cuda else cfg.TRAIN.BATCH_SIZE}")
 
-    # 驗證集使用原始圖片
-    val_dataset = create_dataset(cfg, 'val', 'Origin')
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=cfg.TEST.BATCH_SIZE,
-        shuffle=False,
-        num_workers=cfg.TEST.NUM_WORKERS,
-        pin_memory=cfg.TEST.PIN_MEMORY
-    )
-
-    # 建立模型
+    # Model Setup
+    print("[INFO] Setting up model...")
     model = HRNetV2(
         C=cfg.MODEL.C,
         num_class=cfg.DATASET.NUM_CLASSES,
         in_ch=cfg.MODEL.IN_CHANNELS,
         use3D=(cfg.MODEL.USE_3D == True),
         useAttention=(cfg.MODEL.USE_ATTENTION == True)
-    ).to(device)
+    )
 
-    # 加載檢查點（如果有）
-    if cfg.TRAIN.CHECKPOINT and os.path.isfile(cfg.TRAIN.CHECKPOINT):
-        print(f"[INFO] 從 {cfg.TRAIN.CHECKPOINT} 加載檢查點")
-        if cfg.TRAIN.CHECKPOINT.endswith('.pth'):
-            # 只有模型權重
-            model.load_state_dict(torch.load(cfg.TRAIN.CHECKPOINT, map_location=device))
+    # --- Multi-GPU Handling --- 
+    if use_cuda and len(gpu_ids) > 1:
+        print(f"[INFO] Using {len(gpu_ids)} GPUs. Applying Data Parallelism...")
+        if sync_bn_avail:
+             print("[INFO]   using SyncBatchNorm.")
+             model = convert_model(model) # Convert BN layers for SyncBN
+             model = model.to(base_device) # Move model to primary GPU *before* wrapping
+             model = DataParallelWithCallback(model, device_ids=gpu_ids) # Use SyncBN wrapper
         else:
-            # 完整檢查點
-            optimizer = optim.Adam(model.parameters(), lr=cfg.TRAIN.LEARNING_RATE, weight_decay=cfg.TRAIN.WEIGHT_DECAY)
-            start_epoch = load_checkpoint(model, optimizer, cfg.TRAIN.CHECKPOINT, device)
-
-    # 定義損失函數 - 調整權重以解決類別不平衡
-    if cfg.DATASET.NUM_CLASSES == 2:  # 二分類任務
-        # 計算類別權重 - 根據偽造像素佔比約為1-2%設置
-        # 偽造類別(1)的權重是背景類別(0)的50倍
-        class_weights = torch.tensor([1.0, 50.0]).to(device)
-        print(f"[INFO] 設置類別權重: {class_weights.tolist()}, 重點關注偽造區域")
+             print("[INFO]   using standard nn.DataParallel (SyncBatchNorm not available).")
+             model = model.to(base_device)
+             model = nn.DataParallel(model, device_ids=gpu_ids) # Use standard DataParallel
     else:
-        # 使用配置中的權重
-        class_weights = torch.tensor(cfg.TRAIN.LOSS.WEIGHTS).to(device)
-    
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-    print(f"[INFO] 使用 CrossEntropyLoss 損失函數，權重: {class_weights.tolist()}")
-    
-    # 定義優化器
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=cfg.TRAIN.LEARNING_RATE,
-        weight_decay=cfg.TRAIN.WEIGHT_DECAY,
-        betas=(cfg.TRAIN.OPTIMIZER.BETA1, cfg.TRAIN.OPTIMIZER.BETA2)
+        model = model.to(base_device) # Single GPU or CPU
+
+    # Optimizer (Using AdamW as per DFCN's code)
+    print("[INFO] Setting up Optimizer...")
+    optimizer = optim.AdamW(
+        model.parameters(), 
+        lr=cfg.TRAIN.LEARNING_RATE, 
+        weight_decay=cfg.TRAIN.WEIGHT_DECAY
     )
-    
-    # 定義學習率調度器
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode=cfg.TRAIN.SCHEDULER.MODE,
-        factor=cfg.TRAIN.SCHEDULER.FACTOR,
-        patience=cfg.TRAIN.SCHEDULER.PATIENCE,
-        verbose=cfg.TRAIN.SCHEDULER.VERBOSE
+    print(f"[INFO] Optimizer: AdamW, LR: {cfg.TRAIN.LEARNING_RATE}, Weight Decay: {cfg.TRAIN.WEIGHT_DECAY}")
+
+    # Scheduler (Using MultiStepLR as per DFCN's code)
+    print("[INFO] Setting up Learning Rate Scheduler...")
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, 
+        milestones=cfg.TRAIN.SCHEDULER.MILESTONES, 
+        gamma=cfg.TRAIN.SCHEDULER.GAMMA
     )
-    print("添加學習率調度器: ReduceLROnPlateau")
+    print(f"[INFO] Scheduler: MultiStepLR, Milestones: {cfg.TRAIN.SCHEDULER.MILESTONES}, Gamma: {cfg.TRAIN.SCHEDULER.GAMMA}")
 
-    # 訓練模型
-    logger = setup_logger(cfg.TRAIN.LOG_PATH, f"exp_{get_datetime_str()}_lr{cfg.TRAIN.LEARNING_RATE}_bs{cfg.TRAIN.BATCH_SIZE}")
-    logger.info(f"權重將保存在: {cfg.TRAIN.SAVE_WEIGHT_PATH}")
+    # Loss Function
+    print("[INFO] Setting up Loss Function...")
+    criterion = None
+    if cfg.TRAIN.LOSS.NAME == "CrossEntropyLoss":
+        class_weights = torch.tensor(cfg.TRAIN.LOSS.WEIGHTS).to(base_device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        print(f"[INFO] Using CrossEntropyLoss with weights: {cfg.TRAIN.LOSS.WEIGHTS}")
+    elif cfg.TRAIN.LOSS.NAME == "DiceBCELoss":
+        criterion = DiceBCELoss()
+        print("[INFO] Using DiceBCELoss")
+    elif cfg.TRAIN.LOSS.NAME == "IoULoss":
+        criterion = IoULoss()
+        print("[INFO] Using IoULoss")
+    else:
+        raise ValueError(f"Unsupported loss function: {cfg.TRAIN.LOSS.NAME}")
 
-    # 訓練循環
-    best_miou = 0
-    best_acc = 0
-    for epoch in range(cfg.TRAIN.EPOCH_START, cfg.TRAIN.EPOCH_END + 1):
-        logger.info(f"\nEpoch {epoch}/{cfg.TRAIN.EPOCH_END}")
-        
-        # 訓練
-        train_loss, train_miou, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, logger
-        )
-        
-        # 驗證
-        val_loss, val_miou, val_acc = validate(
-            model, val_loader, criterion, device, logger
-        )
-        
-        # 訓練循環中添加學習率調度器
-        # 在每個 epoch 結束後更新學習率
-        scheduler.step(val_miou)
-        
-        # 記錄指標
-        logger.info(f"Epoch {epoch} - Train Loss: {train_loss:.4f}, Train mIoU: {train_miou:.4f}, Train Acc: {train_acc:.4f}")
-        logger.info(f"Epoch {epoch} - Val Loss: {val_loss:.4f}, Val mIoU: {val_miou:.4f}, Val Acc: {val_acc:.4f}")
-        
-        # 保存最佳模型
-        if val_miou > best_miou:
-            best_miou = val_miou
-            # 保存最佳 mIoU 模型
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_miou': best_miou,
-                'best_acc': best_acc,
-            }, os.path.join(cfg.TRAIN.SAVE_WEIGHT_PATH, "best_miou.pth"))
-            logger.info(f"保存最佳 mIoU 模型：{val_miou:.4f}")
-        
-        if val_acc > best_acc:
-            best_acc = val_acc
-            # 保存最佳 Acc 模型
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_miou': best_miou,
-                'best_acc': best_acc,
-            }, os.path.join(cfg.TRAIN.SAVE_WEIGHT_PATH, "best_acc.pth"))
-            logger.info(f"保存最佳準確率模型：{val_acc:.4f}")
-        
-        # 保存最後一個 epoch 的模型
-        if epoch == cfg.TRAIN.EPOCH_END:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_miou': best_miou,
-                'best_acc': best_acc,
-            }, os.path.join(cfg.TRAIN.SAVE_WEIGHT_PATH, "last.pth"))
-            logger.info("保存最後一個 epoch 的模型")
+    # Auxiliary Loss for Band Prediction (if enabled)
+    criterion_aux = None
+    if cfg.TRAIN.BAND_REG:
+        criterion_aux = nn.BCEWithLogitsLoss() # As used in DFCN
+        print("[INFO] Auxiliary Band Regularization Loss Enabled (BCEWithLogitsLoss)")
 
-    # 保存訓練結果摘要
-    results = {
-        "best_miou": best_miou,
-        "best_acc": best_acc,
-        "final_epoch": cfg.TRAIN.EPOCH_END
-    }
-    with open(os.path.join(cfg.TRAIN.SAVE_WEIGHT_PATH, "training_results.json"), 'w') as f:
-        json.dump(results, f, indent=4)
-    logger.info(f"訓練結果: {results}")
+    # Load Checkpoint (If specified)
+    start_epoch = cfg.TRAIN.EPOCH_START
+    checkpoint_path = os.path.join(project_root, cfg.TRAIN.CHECKPOINT.replace("./", "")) 
+    if cfg.TRAIN.CHECKPOINT and os.path.isfile(checkpoint_path):
+        print(f"[INFO] Resuming from checkpoint: {checkpoint_path}")
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=base_device)
+            # Handle DataParallel prefix if needed
+            state_dict = checkpoint.get('model_state_dict', checkpoint)
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name = k[7:] if k.startswith('module.') else k
+                new_state_dict[name] = v
+            model.load_state_dict(new_state_dict)
+            
+            if 'optimizer_state_dict' in checkpoint:
+                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                 print("[INFO]   Optimizer state loaded.")
+            if 'scheduler_state_dict' in checkpoint:
+                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                 print("[INFO]   Scheduler state loaded.")
+            if 'epoch' in checkpoint:
+                 start_epoch = checkpoint['epoch'] + 1 # Start from next epoch
+                 print(f"[INFO]   Resuming from epoch {start_epoch}")
+            else:
+                print("[WARN] Checkpoint loaded but no epoch found, starting from configured start epoch.")
+        except Exception as e:
+            print(f"[ERROR] Failed to load checkpoint correctly: {e}. Starting from scratch.")
+            start_epoch = cfg.TRAIN.EPOCH_START
+    else:
+        print("[INFO] No valid checkpoint specified, starting training from scratch.")
 
+    # Prepare Logging (TensorBoard)
+    log_dir = os.path.join(project_root, cfg.TRAIN.LOG_PATH.replace("./", ""))
+    os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir)
+    print(f"[INFO] TensorBoard logs will be saved to: {log_dir}")
 
+    # Prepare Checkpoint Saving Directory
+    save_dir = os.path.join(project_root, cfg.TRAIN.SAVE_WEIGHT_PATH.replace("./", ""))
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"[INFO] Model checkpoints will be saved to: {save_dir}")
+
+    # Training Loop
+    print("="*30)
+    print("      Starting Training (DFCN Style)      ")
+    print("="*30)
+    
+    max_iou = 0.0 # Track best validation mIoU
+    
+    epoch_iterator = trange(start_epoch, cfg.TRAIN.EPOCH_END + 1, desc="Epochs")
+    for epoch in epoch_iterator:
+        model.train() # Set model to training mode
+        avg_loss_list = []
+        avg_aux_loss_list = [] # Only used if BAND_REG is True
+        batch_times = []
+        
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch} Loss=N/A', leave=False)
+        for i, data in enumerate(pbar):
+            start_time = time.time()
+            step = epoch * len(train_loader) + i # Global step for logging
+            
+            # 解包数据集返回的值
+            if len(data) == 4:  # 如果有四个返回值 (image, label, band_label, img_name)
+                image, label, label2, img_names = data
+            elif len(data) == 3:  # 兼容三个返回值 (image, label, band_label)
+                image, label, label2 = data
+                img_names = None
+            else:  # 处理其他可能的情况
+                raise ValueError(f"Unexpected dataset return format: {len(data)} items")
+            
+            image = image.to(base_device, dtype=torch.float32)
+            label = label.to(base_device, dtype=torch.long) # Mask for main loss
+            label2 = label2.to(base_device, dtype=torch.float32) # Band labels for aux loss
+            
+            optimizer.zero_grad()
+            
+            # Forward pass (Model returns two outputs)
+            pred_seg, pred_bands = model(image)
+            
+            # --- Calculate Main Segmentation Loss --- 
+            loss_main = 0
+            # For CrossEntropy: Input (B, C, H, W), Target (B, H, W) Long
+            if isinstance(criterion, nn.CrossEntropyLoss):
+                 loss_main = criterion(pred_seg, label)
+            # For Dice/IoU: Input (B, 1, H, W) or (B, H, W) logits, Target (B, H, W) Float
+            else:
+                 # Assume pred_seg is (B, 2, H, W), need to get class 1 logits/probs
+                 # If using BCE-based losses (DiceBCE, IoU), sigmoid is applied inside loss
+                 # So we need the raw logit for class 1. 
+                 # pred_seg[:, 1] gives logits for class 1. Shape (B, H, W)
+                 if pred_seg.size(1) == 2:
+                     loss_main = criterion(pred_seg[:, 1], label.float())
+                 else: # Should not happen if model output is correct
+                      print("[WARN] Loss calculation mismatch: Expecting 2 channels from model for Dice/IoU.")
+                      loss_main = torch.tensor(0.0).to(base_device) 
+                      
+            # --- Calculate Auxiliary Band Loss (if enabled) --- 
+            loss_aux = torch.tensor(0.0).to(base_device)
+            if cfg.TRAIN.BAND_REG and criterion_aux is not None:
+                 loss_aux = criterion_aux(pred_bands, label2)
+                 total_loss = loss_main + loss_aux
+            else:
+                 total_loss = loss_main
+            
+            # Backpropagation
+            total_loss.backward()
+            optimizer.step()
+            
+            # Record losses
+            avg_loss_list.append(loss_main.item())
+            if cfg.TRAIN.BAND_REG:
+                 avg_aux_loss_list.append(loss_aux.item())
+            
+            # Update progress bar description
+            desc_str = f"Epoch {epoch} Loss={np.mean(avg_loss_list):.4f}"
+            if cfg.TRAIN.BAND_REG:
+                desc_str += f" (Aux={np.mean(avg_aux_loss_list):.4f})"
+            pbar.set_description(desc_str)
+            pbar.refresh()
+            
+            # Log loss to TensorBoard periodically
+            if (i + 1) % cfg.TRAIN.LOG_LOSS == 0:
+                writer.add_scalar('Loss/train_main', loss_main.item(), step)
+                if cfg.TRAIN.BAND_REG:
+                     writer.add_scalar('Loss/train_aux', loss_aux.item(), step)
+                writer.add_scalar('Loss/train_total', total_loss.item(), step)
+            
+            # Log images to TensorBoard periodically
+            if (i + 1) % cfg.TRAIN.LOG_IMAGE == 0:
+                try:
+                    img_vis = image[0].detach().cpu().numpy() # C, H, W
+                    lbl_vis = label[0].detach().cpu().numpy() # H, W
+                    prd_vis = pred_seg[0].detach().max(dim=0)[1].cpu().numpy() # H, W (argmax prediction)
+                    
+                    # 規範化影像數據範圍為0-255
+                    img_vis_rgb = normColor( ((img_vis.transpose(1, 2, 0) + 1.0) / 2.0) * 255.0 ) # H, W, C
+                    
+                    # 確保 decode_target 方法存在並正確運行
+                    try:
+                        lbl_vis_rgb = train_loader.dataset.decode_target(lbl_vis).astype(np.uint8) # H, W, C
+                        prd_vis_rgb = train_loader.dataset.decode_target(prd_vis).astype(np.uint8) # H, W, C
+                    except AttributeError as e:
+                        print(f"[WARN] 缺少 decode_target 方法: {e}")
+                        # 簡單的後備方案 - 為缺少時創建一個簡單的灰度圖
+                        lbl_vis_rgb = np.stack([lbl_vis*255, lbl_vis*255, lbl_vis*255], axis=2).astype(np.uint8)
+                        prd_vis_rgb = np.stack([prd_vis*255, prd_vis*255, prd_vis*255], axis=2).astype(np.uint8)
+                    
+                    # 確保所有圖像都是正確的格式（HWC, uint8）
+                    if not (img_vis_rgb.ndim == 3 and img_vis_rgb.shape[2] == 3):
+                        print(f"[WARN] 輸入影像格式不正確 (shape={img_vis_rgb.shape})，無法記錄到 TensorBoard")
+                    else:
+                        writer.add_image('Images/Train_Input', img_vis_rgb, step, dataformats='HWC')
+                        writer.add_image('Images/Train_Label', lbl_vis_rgb, step, dataformats='HWC')
+                        writer.add_image('Images/Train_Pred', prd_vis_rgb, step, dataformats='HWC')
+                except Exception as e:
+                    print(f"[WARN] 無法記錄影像到 TensorBoard: {str(e)}")
+                    import traceback
+                    traceback.print_exc() # 打印詳細的堆棧跟踪，幫助調試
+
+            batch_times.append(time.time() - start_time)
+        # End of Epoch Train Loop
+        
+        # Log average epoch losses
+        avg_epoch_loss = np.mean(avg_loss_list)
+        writer.add_scalar('Loss/train_epoch_main_avg', avg_epoch_loss, epoch)
+        if cfg.TRAIN.BAND_REG:
+             avg_epoch_aux_loss = np.mean(avg_aux_loss_list)
+             writer.add_scalar('Loss/train_epoch_aux_avg', avg_epoch_aux_loss, epoch)
+             print(f"Epoch {epoch} Training Avg Loss: Main={avg_epoch_loss:.4f}, Aux={avg_epoch_aux_loss:.4f}")
+        else:
+             print(f"Epoch {epoch} Training Avg Loss: {avg_epoch_loss:.4f}")
+        print(f"Epoch {epoch} Average Batch Time: {np.mean(batch_times):.4f}s")
+             
+        # --- Validation and Saving --- 
+        if (epoch) % cfg.TRAIN.VAL_FREQ == 0 or epoch == cfg.TRAIN.EPOCH_END:
+             val_score = checkPerformance(model, base_device, cfg)
+             current_iou = val_score.get("Mean IoU", 0.0)
+             current_acc = val_score.get("Overall acc", 0.0)
+             current_macc = val_score.get("Mean acc", 0.0)
+             
+             # Log validation metrics to TensorBoard
+             writer.add_scalar('Metrics/val_mean_iou', current_iou, epoch)
+             writer.add_scalar('Metrics/val_overall_acc', current_acc, epoch)
+             writer.add_scalar('Metrics/val_mean_acc', current_macc, epoch)
+             
+             # Save last model
+             save_path_last = os.path.join(save_dir, 'last.pth')
+             print(f"[INFO] Saving last checkpoint to {save_path_last}")
+             torch.save({
+                 'epoch': epoch,
+                 'model_state_dict': model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(),
+                 'optimizer_state_dict': optimizer.state_dict(),
+                 'scheduler_state_dict': scheduler.state_dict(),
+                 'val_mean_iou': current_iou, 
+             }, save_path_last)
+             
+             # Save best model based on Mean IoU
+             if current_iou > max_iou:
+                 max_iou = current_iou
+                 save_path_best = os.path.join(save_dir, 'best.pth')
+                 print(f"[INFO] New best Mean IoU: {max_iou:.4f}. Saving best checkpoint to {save_path_best}")
+                 torch.save({
+                     'epoch': epoch,
+                     'model_state_dict': model.state_dict() if not hasattr(model, 'module') else model.module.state_dict(),
+                     'optimizer_state_dict': optimizer.state_dict(),
+                     'scheduler_state_dict': scheduler.state_dict(),
+                     'val_mean_iou': max_iou, 
+                 }, save_path_best)
+                 
+             print(f"[INFO] Epoch {epoch} Validation: Mean IoU={current_iou:.4f}, Overall Acc={current_acc:.4f}. Best Mean IoU={max_iou:.4f}")
+        
+        # Step the scheduler
+        scheduler.step()
+        writer.add_scalar('LR', optimizer.param_groups[0]['lr'], epoch)
+        
+    # End of Training Loop
+    writer.close() # Close TensorBoard writer
+    print("="*30)
+    print(f"      Training Finished. Best Validation Mean IoU: {max_iou:.4f}      ")
+    print("="*30)
+
+# --- Argument Parser and Entry Point --- 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="訓練高光譜影像偽造檢測模型")
+    parser = argparse.ArgumentParser(description="HyperForensics++ Training Script (DFCN Style)")
+    # Use config path relative to project root for consistency
     parser.add_argument("--config_path", type=str, default="./config/train_config.yaml",
-                      help="配置文件路徑")
-    parser.add_argument("--configs", nargs="+", type=str,
-                      help="要使用的配置名稱列表，例如：config1 config2")
+                        help="Path to the YAML configuration file relative to project root.")
+    # Remove --configs argument as data lists are now defined in the main config file
+    # parser.add_argument("--configs", type=str, nargs="+", help="Not used in DFCN style. Define data lists in config.", default=None)
+    
     args = parser.parse_args()
     main(args) 

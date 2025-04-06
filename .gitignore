@@ -12,3 +12,6 @@ output/
 *.csv
 *.txt
 !requirements.txt
+checkpoints/
+checkpoints_dfcn/
+temp/
