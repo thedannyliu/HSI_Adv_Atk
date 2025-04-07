@@ -24,10 +24,12 @@ def fgsm_hybrid_attack(model, images, labels, eps, criterion, device, mean, std,
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
     # 反正規化
     images_unnorm = unnormalize(images, mean, std)
     images_unnorm = images_unnorm.clone().detach().to(device).float()
-    labels = labels.clone().detach().to(device)
 
     B, C, H, W = images_unnorm.shape
     
@@ -119,7 +121,8 @@ def pgd_hybrid_attack(model, images, labels, eps, alpha, steps, criterion, devic
         torch.Tensor: 對抗樣本
     """
     images_orig = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
     adv_images_unnorm = images_orig.clone().detach()
     
     B, C, H, W = images_orig.shape
@@ -210,7 +213,8 @@ def cw_hybrid_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.01
     """
     # 反正規化
     images_unnorm = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
     
     B, C, H, W = images_unnorm.shape
     

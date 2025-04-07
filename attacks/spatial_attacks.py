@@ -1,12 +1,12 @@
 import torch
 import torch.nn.functional as F
-from .utils import normalize, unnormalize, zero_gradients
+from .utils import normalize, unnormalize, zero_gradients, get_important_bands
 
 def fgsm_spatial_attack(model, images, labels, eps, criterion, device, mean, std):
     """
-    空間域上的快速梯度符號法(FGSM)攻擊
+    快速梯度符號法(FGSM)空間攻擊
     
-    在空間域上進行攻擊時，專注於在空間位置上施加擾動，確保擾動在各波段間保持一致的空間模式。
+    專注於攻擊重要的空間結構，對圖像的空間特徵進行擾動。
     
     Args:
         model (nn.Module): 目標模型
@@ -21,42 +21,49 @@ def fgsm_spatial_attack(model, images, labels, eps, criterion, device, mean, std
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
     # 反正規化
     images_unnorm = unnormalize(images, mean, std)
     images_unnorm = images_unnorm.clone().detach().to(device).float()
-    labels = labels.clone().detach().to(device)
-
+    
     # 確保可求導
     images_unnorm.requires_grad = True
-
+    
     # Forward
     outputs = model(normalize(images_unnorm, mean, std))
     if isinstance(outputs, tuple):
-        # 若模型回傳 (pred, pred_bands)，取 pred 用來計算 loss
         outputs = outputs[0]
     loss = criterion(outputs, labels)
     
     # 反向傳播
     model.zero_grad()
     loss.backward()
-
+    
     # 取得梯度
     grad = images_unnorm.grad.data
     
     # 計算空間梯度幅度 (在通道維度上取平均)
-    # 這樣確保對所有波段應用相同的空間位置擾動模式
     spatial_grad_magnitude = torch.mean(grad.abs(), dim=1, keepdim=True)
-    grad_sign = torch.sign(grad)
     
-    # 應用空間一致性掩碼：將相同的空間位置掩碼應用到所有波段
+    # 創建空間掩碼：選擇梯度最大的空間位置
+    # 這裡選擇大於中位數的位置
     spatial_mask = (spatial_grad_magnitude > torch.median(spatial_grad_magnitude)).float()
     
+    # 將空間掩碼擴展到所有通道
+    expanded_spatial_mask = spatial_mask.repeat(1, images.size(1), 1, 1)
+    
+    # 應用掩碼到符號梯度
+    grad_sign = torch.sign(grad)
+    masked_grad_sign = grad_sign * expanded_spatial_mask
+    
     # 生成對抗樣本
-    adv_images_unnorm = images_unnorm + eps * grad_sign * spatial_mask
+    adv_images_unnorm = images_unnorm + eps * masked_grad_sign
     
     # clamp 到 [0,1]
     adv_images_unnorm = torch.clamp(adv_images_unnorm, 0, 1)
-
+    
     # 重新正規化
     adv_images = normalize(adv_images_unnorm, mean, std)
     return adv_images.detach()
@@ -64,9 +71,9 @@ def fgsm_spatial_attack(model, images, labels, eps, criterion, device, mean, std
 
 def pgd_spatial_attack(model, images, labels, eps, alpha, steps, criterion, device, mean, std):
     """
-    空間域上的投影梯度下降(PGD)攻擊
+    投影梯度下降(PGD)空間攻擊
     
-    在空間域上進行攻擊時，專注於在空間位置上施加擾動，確保擾動在各波段間保持一致的空間模式。
+    通過多步迭代優化，專注於攻擊重要的空間結構，對圖像的空間特徵進行擾動。
     
     Args:
         model (nn.Module): 目標模型
@@ -83,15 +90,16 @@ def pgd_spatial_attack(model, images, labels, eps, alpha, steps, criterion, devi
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
+    # 反正規化
     images_orig = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
     adv_images_unnorm = images_orig.clone().detach()
     
-    B, C, H, W = images_orig.shape
-    
-    # 保存空間擾動掩碼
+    # 保存空間掩碼（只計算一次）
     spatial_mask = None
-
+    
     for i in range(steps):
         adv_images_unnorm.requires_grad = True
         outputs = model(normalize(adv_images_unnorm, mean, std))
@@ -105,18 +113,19 @@ def pgd_spatial_attack(model, images, labels, eps, alpha, steps, criterion, devi
         # 計算空間梯度幅度
         grad = adv_images_unnorm.grad.data
         
+        # 首次迭代：計算空間掩碼
         if spatial_mask is None:
-            # 首次迭代：基於原始梯度計算空間掩碼
             spatial_grad_magnitude = torch.mean(grad.abs(), dim=1, keepdim=True)
             
-            # 只關注重要位置：選擇梯度最大的前25%像素位置
+            # 選擇梯度最大的前25%位置
+            B = images.size(0)
             threshold = torch.quantile(spatial_grad_magnitude.view(B, -1), 0.75, dim=1).view(B, 1, 1, 1)
             spatial_mask = (spatial_grad_magnitude > threshold).float()
             
-            # 確保空間掩碼在通道維度上重複
-            spatial_mask = spatial_mask.repeat(1, C, 1, 1)
+            # 擴展到所有通道
+            spatial_mask = spatial_mask.repeat(1, images.size(1), 1, 1)
         
-        # 應用空間掩碼到梯度
+        # 應用掩碼
         masked_grad = grad * spatial_mask
         grad_sign = masked_grad.sign()
         
@@ -126,16 +135,18 @@ def pgd_spatial_attack(model, images, labels, eps, alpha, steps, criterion, devi
         # 確保擾動在限制範圍內
         eta = torch.clamp(adv_images_unnorm - images_orig, min=-eps, max=eps)
         adv_images_unnorm = torch.clamp(images_orig + eta, 0, 1).detach()
-
+    
+    # 重新正規化
     adv_images = normalize(adv_images_unnorm, mean, std)
     return adv_images.detach()
 
 
-def cw_spatial_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.01, eps=0.1, device='cuda', mean=None, std=None):
+def cw_spatial_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.01, eps=0.1,
+                      device='cuda', mean=None, std=None):
     """
-    空間域上的Carlini & Wagner L2 攻擊
+    Carlini & Wagner 空間攻擊
     
-    在空間域上進行攻擊時，專注於在空間位置上施加擾動，確保擾動在各波段間保持一致的空間模式。
+    通過優化損失函數，專注於攻擊重要的空間結構，生成高質量對抗樣本。
     
     Args:
         model (nn.Module): 目標模型
@@ -145,7 +156,7 @@ def cw_spatial_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.0
         kappa (float): 置信度參數
         steps (int): 優化步數
         lr (float): 學習率
-        eps (float): 最大擾動範圍
+        eps (float): 最大擾動範圍（限制L∞範數）
         device: 計算設備
         mean (list or float): 正規化均值
         std (list or float): 正規化標準差
@@ -153,74 +164,123 @@ def cw_spatial_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.0
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
     # 反正規化
-    images_unnorm = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
+    images_orig = unnormalize(images, mean, std).clone().detach().to(device)
     
-    B, C, H, W = images_unnorm.shape
+    # 初始化空間擾動參數
+    B, C, H, W = images_orig.shape
     
-    # 初始化空間擾動（較少參數）：每個空間位置共享相同的擾動
+    # 我們只優化一個空間掩碼，對所有通道應用相同的擾動
     spatial_delta = torch.zeros((B, 1, H, W), requires_grad=True, device=device)
     
+    # 優化器只針對空間擾動
     optimizer = torch.optim.Adam([spatial_delta], lr=lr)
+    
+    # 計算空間掩碼
+    # 執行一次前向傳播來獲取初始梯度
+    temp_images = images_orig.clone().detach()
+    temp_images.requires_grad = True
+    outputs = model(normalize(temp_images, mean, std))
+    if isinstance(outputs, tuple):
+        outputs = outputs[0]
+    loss = F.cross_entropy(outputs, labels)
+    
+    model.zero_grad()
+    loss.backward()
+    
+    grad = temp_images.grad.data
+    spatial_grad_magnitude = torch.mean(grad.abs(), dim=1, keepdim=True)
+    
+    # 選擇梯度最大的前25%位置
+    threshold = torch.quantile(spatial_grad_magnitude.view(B, -1), 0.75, dim=1).view(B, 1, 1, 1)
+    spatial_mask = (spatial_grad_magnitude > threshold).float()
     
     # 用於計算對抗損失的函數
     def compute_adv_loss(outputs, targets):
-        # 對於分割任務，我們希望模型的預測與真實標籤不同
-        pred_labels = outputs.argmax(dim=1)
-        return -F.nll_loss(F.log_softmax(outputs, dim=1), targets)
-
+        # 對於分類任務
+        target_onehot = torch.zeros(outputs.shape).to(device)
+        target_onehot.scatter_(1, targets.unsqueeze(1), 1)
+        
+        # 找到目標類別之外的最大得分類別
+        other = outputs.clone().detach()
+        other[target_onehot > 0.5] = -float('inf')
+        other_max = other.max(1, keepdim=True)[0]
+        
+        # 目標類別的得分
+        target_score = torch.sum(outputs * target_onehot, 1)
+        
+        # 對抗損失：希望其他類別的得分大於目標類別的得分
+        adv_loss = torch.clamp(target_score - other_max + kappa, min=0)
+        return adv_loss.mean()
+    
+    # 優化過程
     for step in range(steps):
         optimizer.zero_grad()
         
-        # 將空間擾動擴展到所有通道
-        delta = spatial_delta.repeat(1, C, 1, 1)
+        # 擴展空間擾動到所有通道，乘以空間掩碼
+        expanded_delta = spatial_delta.repeat(1, C, 1, 1) * spatial_mask.repeat(1, C, 1, 1)
         
-        # 生成對抗樣本
-        adv_images = torch.clamp(images_unnorm + delta, 0, 1)
-        adv_images_norm = normalize(adv_images, mean, std)
+        # 生成當前對抗樣本
+        adv_images_unnorm = torch.clamp(images_orig + expanded_delta, 0, 1)
         
-        outputs = model(adv_images_norm)
+        # 重新正規化後前向傳播
+        outputs = model(normalize(adv_images_unnorm, mean, std))
         if isinstance(outputs, tuple):
             outputs = outputs[0]
         
-        # 計算對抗損失
+        # 計算CW損失
         adv_loss = compute_adv_loss(outputs, labels)
         
-        # 計算擾動的L2範數
-        l2_loss = torch.sum(delta ** 2)
+        # 添加擾動大小的正則化項
+        reg_loss = c * torch.norm(expanded_delta.view(B, -1), p=2, dim=1).mean()
         
         # 總損失
-        loss = adv_loss + c * l2_loss
-        loss.backward()
+        total_loss = adv_loss + reg_loss
+        
+        # 反向傳播
+        total_loss.backward()
         optimizer.step()
         
-        # 限制擾動範圍在 [-eps, eps]
-        spatial_delta.data = torch.clamp(spatial_delta.data, -eps, eps)
+        # 確保擾動在eps範圍內
+        with torch.no_grad():
+            expanded_delta_clamped = torch.clamp(expanded_delta, min=-eps, max=eps)
+            spatial_delta.data = torch.mean(
+                expanded_delta_clamped.data, dim=1, keepdim=True
+            ) * spatial_mask
+    
+    # 生成最終的對抗樣本
+    with torch.no_grad():
+        # 擴展空間擾動到所有通道，乘以空間掩碼
+        expanded_delta = spatial_delta.repeat(1, C, 1, 1) * spatial_mask.repeat(1, C, 1, 1)
         
-        if step % 100 == 0:
-            print(f"[空間C&W] Step {step}/{steps}, Loss: {loss.item()}")
+        # 確保擾動在eps範圍內
+        expanded_delta = torch.clamp(expanded_delta, min=-eps, max=eps)
+        
+        # 生成最終對抗樣本
+        adv_images_unnorm = torch.clamp(images_orig + expanded_delta, 0, 1)
+        
+        # 重新正規化
+        adv_images = normalize(adv_images_unnorm, mean, std)
     
-    # 將空間擾動擴展到所有通道
-    final_delta = spatial_delta.repeat(1, C, 1, 1)
-    
-    adv_images = torch.clamp(images_unnorm + final_delta, 0, 1)
-    adv_images_norm = normalize(adv_images, mean, std)
-    return adv_images_norm.detach()
+    return adv_images.detach()
 
 
-def deepfool_spatial_attack(model, images, num_classes=2, max_iter=50, overshoot=0.02, device='cuda', mean=None, std=None):
+def deepfool_spatial_attack(model, images, num_classes=2, max_iter=50, overshoot=0.02,
+                           device='cuda', mean=None, std=None):
     """
-    空間域上的DeepFool攻擊
+    DeepFool 空間攻擊
     
-    在空間域上進行攻擊時，專注於在空間位置上施加擾動，確保擾動在各波段間保持一致的空間模式。
+    通過迭代尋找最小擾動，使模型錯誤分類。專注於空間域的重要區域。
     
     Args:
         model (nn.Module): 目標模型
         images (torch.Tensor): 輸入圖像
-        num_classes (int): 分類數量
+        num_classes (int): 類別數量
         max_iter (int): 最大迭代次數
-        overshoot (float): 過度參數
+        overshoot (float): 過沖參數
         device: 計算設備
         mean (list or float): 正規化均值
         std (list or float): 正規化標準差
@@ -230,110 +290,118 @@ def deepfool_spatial_attack(model, images, num_classes=2, max_iter=50, overshoot
     """
     # 反正規化
     images_unnorm = unnormalize(images, mean, std).clone().detach().to(device)
-    batch_size = images.shape[0]
-    adv_images = images_unnorm.clone().detach()
+    B, C, H, W = images_unnorm.shape
     
-    # 一次處理一個樣本
-    for i in range(batch_size):
-        sample = adv_images[i:i+1].clone().detach().requires_grad_(True)
-        original_sample = images_unnorm[i:i+1].clone().detach()
+    # 初始化空間掩碼（通過一次前向傳播獲取梯度）
+    temp_images = images_unnorm.clone()
+    temp_images.requires_grad = True
+    
+    # 前向傳播並獲取預測
+    outputs = model(normalize(temp_images, mean, std))
+    if isinstance(outputs, tuple):
+        outputs = outputs[0]
+    
+    # 獲取初始預測
+    pred_orig = torch.argmax(outputs, dim=1)
+    
+    # 初始化結果
+    adv_images_unnorm = images_unnorm.clone()
+    
+    # 為每個樣本計算對抗擾動
+    for batch_idx in range(B):
+        # 獲取當前樣本
+        sample = images_unnorm[batch_idx:batch_idx+1].clone().detach().requires_grad_(True)
         
-        B, C, H, W = sample.shape
-        
+        # 獲取初始預測
         outputs = model(normalize(sample, mean, std))
         if isinstance(outputs, tuple):
             outputs = outputs[0]
+        f_0 = outputs[0, pred_orig[batch_idx]]
         
-        # 獲取原始預測
-        _, pred_orig = torch.max(outputs, 1)
-        pred_orig = pred_orig.item()
+        # 計算梯度以獲取空間掩碼
+        f_0.backward(retain_graph=True)
+        grad_0 = sample.grad.data.clone()
         
-        # 空間掩碼：記錄哪些空間位置的梯度最大
-        spatial_mask = None
+        # 計算空間重要性掩碼
+        spatial_importance = torch.mean(grad_0.abs(), dim=1, keepdim=True)
+        threshold = torch.quantile(spatial_importance.view(-1), 0.75)
+        spatial_mask = (spatial_importance > threshold).float()
         
-        # 迭代尋找最小擾動
-        for it in range(max_iter):
-            # 計算梯度
-            gradients = []
-            for k in range(num_classes):
-                zero_gradients(sample)
-                outputs = model(normalize(sample, mean, std))
-                if isinstance(outputs, tuple):
-                    outputs = outputs[0]
-                
-                # 計算對第k類的梯度
-                class_score = outputs[0, k]
-                class_score.backward(retain_graph=True)
-                grad = sample.grad.data.clone()
-                gradients.append(grad)
-            
-            # 如果已經成功誤導，則停止
+        # 擴展到所有通道
+        expanded_spatial_mask = spatial_mask.repeat(1, C, 1, 1)
+        
+        # 重置，準備正式的DeepFool迭代
+        sample.grad.zero_()
+        model.zero_grad()
+        sample = images_unnorm[batch_idx:batch_idx+1].clone().detach().requires_grad_(True)
+        
+        current_pred = pred_orig[batch_idx]
+        iteration = 0
+        total_perturbation = torch.zeros_like(sample)
+        
+        while current_pred == pred_orig[batch_idx] and iteration < max_iter:
             outputs = model(normalize(sample, mean, std))
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
-            _, current_pred = torch.max(outputs, 1)
-            if current_pred.item() != pred_orig and it > 0:
-                break
             
-            # 尋找最近的決策邊界
-            w_k = gradients[pred_orig]
-            f_k = outputs[0, pred_orig]
+            # 初始化最小擾動
+            w_direction = None
+            f_direction = None
+            min_distance = float('inf')
             
-            # 首次迭代：計算空間掩碼
-            if spatial_mask is None and it == 0:
-                # 計算每個空間位置的梯度幅度
-                spatial_grad_magnitude = torch.mean(w_k.abs(), dim=1, keepdim=True)
-                
-                # 選擇梯度最大的前50%像素位置
-                threshold = torch.quantile(spatial_grad_magnitude.view(B, -1), 0.5, dim=1).view(B, 1, 1, 1)
-                spatial_mask = (spatial_grad_magnitude > threshold).float().repeat(1, C, 1, 1)
-            
-            min_dist = float('inf')
-            closest_class = -1
-            
+            # 檢查所有其他類別
             for k in range(num_classes):
-                if k == pred_orig:
+                if k == current_pred:
                     continue
                 
-                w_k_prime = gradients[k]
-                f_k_prime = outputs[0, k]
+                zero_gradients(sample)
                 
-                # 應用空間掩碼到梯度差
-                if spatial_mask is not None:
-                    w_diff = (w_k - w_k_prime) * spatial_mask
-                else:
-                    w_diff = w_k - w_k_prime
-                    
-                f_diff = f_k - f_k_prime
+                # 計算類別k的得分
+                f_k = outputs[0, k]
+                f_k.backward(retain_graph=True)
                 
-                # 計算到決策邊界的距離
-                dist = abs(f_diff) / (w_diff.norm() + 1e-7)
+                # 獲取梯度並應用空間掩碼
+                grad_k = sample.grad.data.clone() * expanded_spatial_mask
                 
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_class = k
-            
-            # 如果找不到最近的類別，則停止
-            if closest_class == -1:
-                break
-            
-            # 計算擾動方向，應用空間掩碼
-            if spatial_mask is not None:
-                w_diff = (gradients[pred_orig] - gradients[closest_class]) * spatial_mask
-            else:
-                w_diff = gradients[pred_orig] - gradients[closest_class]
+                # 計算類別差異
+                w_k = grad_k
+                f_k = outputs[0, k] - outputs[0, current_pred]
                 
-            f_diff = outputs[0, pred_orig] - outputs[0, closest_class]
+                # 計算擾動方向和距離
+                distance = abs(f_k) / (torch.norm(w_k.view(-1)) + 1e-8)
+                
+                # 更新最小擾動
+                if distance < min_distance:
+                    min_distance = distance
+                    w_direction = w_k
+                    f_direction = f_k
             
-            # 計算擾動大小
-            pert_magnitude = abs(f_diff) / (w_diff.norm() + 1e-7)
-            
-            # 添加擾動
-            perturbation = (1 + overshoot) * pert_magnitude * w_diff / (w_diff.norm() + 1e-7)
-            sample = sample + perturbation
-            sample = torch.clamp(sample, 0, 1).detach().requires_grad_(True)
+            # 沿最小擾動方向更新樣本
+            if w_direction is not None:
+                # 計算擾動大小
+                pert_magnitude = abs(f_direction) / (torch.norm(w_direction.view(-1)) + 1e-8)
+                
+                # 計算擾動
+                current_perturbation = (pert_magnitude + 1e-8) * w_direction / (torch.norm(w_direction) + 1e-8)
+                
+                # 更新總擾動
+                total_perturbation += (1 + overshoot) * current_perturbation
+                
+                # 更新樣本
+                sample = torch.clamp(images_unnorm[batch_idx:batch_idx+1] + total_perturbation, 0, 1)
+                sample.requires_grad_(True)
+                
+                # 獲取新的預測
+                outputs = model(normalize(sample, mean, std))
+                if isinstance(outputs, tuple):
+                    outputs = outputs[0]
+                current_pred = torch.argmax(outputs, dim=1)[0].item()
+                
+                iteration += 1
         
-        adv_images[i:i+1] = sample
+        # 更新批次中的對抗樣本
+        adv_images_unnorm[batch_idx:batch_idx+1] = sample.detach()
     
-    adv_images_norm = normalize(adv_images, mean, std)
-    return adv_images_norm.detach() 
+    # 重新正規化
+    adv_images = normalize(adv_images_unnorm, mean, std)
+    return adv_images.detach() 

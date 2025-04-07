@@ -22,26 +22,15 @@ def fgsm_spectral_attack(model, images, labels, eps, criterion, device, mean, st
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
     # 反正規化
     images_unnorm = unnormalize(images, mean, std)
     images_unnorm = images_unnorm.clone().detach().to(device).float()
-    labels = labels.clone().detach().to(device)
-
+    
     B, C, H, W = images_unnorm.shape
     
-    # 如果未指定目標波段，則自動選擇重要波段
-    if target_bands is None:
-        target_bands = get_important_bands(images_unnorm, n_bands=C//3)
-    
-    # 確保目標波段列表不為空
-    if not target_bands:
-        target_bands = list(range(C))
-
-    # 創建光譜掩碼：只攻擊特定波段
-    spectral_mask = torch.zeros((1, C, 1, 1), device=device)
-    for band_idx in target_bands:
-        spectral_mask[0, band_idx, 0, 0] = 1.0
-
     # 確保可求導
     images_unnorm.requires_grad = True
 
@@ -59,12 +48,28 @@ def fgsm_spectral_attack(model, images, labels, eps, criterion, device, mean, st
     # 取得梯度
     grad = images_unnorm.grad.data
     
-    # 應用光譜掩碼
-    grad = grad * spectral_mask
+    # 如果未指定目標波段，則自動選擇重要波段
+    if target_bands is None:
+        target_bands = get_important_bands(images_unnorm, n_bands=C//3)
+    
+    # 確保目標波段列表不為空
+    if not target_bands:
+        target_bands = list(range(C))
+
+    # 創建光譜掩碼：只攻擊特定波段
+    spectral_mask = torch.zeros((1, C, 1, 1), device=device)
+    for band_idx in target_bands:
+        spectral_mask[0, band_idx, 0, 0] = 1.0
+
+    # 擴展掩碼到全尺寸
+    spectral_mask = spectral_mask.repeat(B, 1, H, W)
+    
+    # 計算符號梯度並應用掩碼
     grad_sign = torch.sign(grad)
+    masked_grad_sign = grad_sign * spectral_mask
     
     # 生成對抗樣本
-    adv_images_unnorm = images_unnorm + eps * grad_sign
+    adv_images_unnorm = images_unnorm + eps * masked_grad_sign
     
     # clamp 到 [0,1]
     adv_images_unnorm = torch.clamp(adv_images_unnorm, 0, 1)
@@ -96,8 +101,11 @@ def pgd_spectral_attack(model, images, labels, eps, alpha, steps, criterion, dev
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
+    # 反正規化
     images_orig = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
     adv_images_unnorm = images_orig.clone().detach()
     
     B, C, H, W = images_orig.shape
@@ -115,6 +123,9 @@ def pgd_spectral_attack(model, images, labels, eps, alpha, steps, criterion, dev
     for band_idx in target_bands:
         spectral_mask[0, band_idx, 0, 0] = 1.0
 
+    # 擴展掩碼到全尺寸
+    spectral_mask = spectral_mask.repeat(B, 1, H, W)
+
     for i in range(steps):
         adv_images_unnorm.requires_grad = True
         outputs = model(normalize(adv_images_unnorm, mean, std))
@@ -125,18 +136,19 @@ def pgd_spectral_attack(model, images, labels, eps, alpha, steps, criterion, dev
         model.zero_grad()
         loss.backward()
         
-        # 應用光譜掩碼到梯度
-        grad = adv_images_unnorm.grad.data * spectral_mask
-        grad_sign = grad.sign()
+        # 獲取梯度
+        grad = adv_images_unnorm.grad.data
+        
+        # 應用光譜掩碼
+        masked_grad = grad * spectral_mask
+        grad_sign = masked_grad.sign()
         
         # 更新對抗樣本
         adv_images_unnorm = adv_images_unnorm + alpha * grad_sign
         
-        # 確保擾動在限制範圍內且僅應用於目標波段
-        delta = adv_images_unnorm - images_orig
-        delta = delta * spectral_mask  # 只在選定的波段上應用擾動
-        delta = torch.clamp(delta, -eps, eps)
-        adv_images_unnorm = torch.clamp(images_orig + delta, 0, 1).detach()
+        # 確保擾動在限制範圍內
+        eta = torch.clamp(adv_images_unnorm - images_orig, min=-eps, max=eps)
+        adv_images_unnorm = torch.clamp(images_orig + eta, 0, 1).detach()
 
     adv_images = normalize(adv_images_unnorm, mean, std)
     return adv_images.detach()
@@ -165,9 +177,11 @@ def cw_spectral_attack(model, images, labels, c=0.01, kappa=0, steps=1000, lr=0.
     Returns:
         torch.Tensor: 對抗樣本
     """
+    # 確保標籤是 Long 類型
+    labels = labels.clone().detach().to(device).long()
+    
     # 反正規化
     images_unnorm = unnormalize(images, mean, std).clone().detach().to(device)
-    labels = labels.clone().detach().to(device)
     
     B, C, H, W = images_unnorm.shape
     
