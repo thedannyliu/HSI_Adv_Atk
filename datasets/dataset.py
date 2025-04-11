@@ -74,14 +74,28 @@ class forgeryHSIDataset(Dataset):
         self.transform = transform
         self.config = config
         
-        # 检查flist是否为完整路径
+        # 檢查flist是否為完整路徑
         if os.path.isabs(flist) and os.path.exists(flist):
             self.flist = flist
+        elif os.path.exists(flist):
+            # 如果是相對路徑但存在
+            self.flist = flist
         else:
-            # 使用以前的逻辑：相对于root/dataset_split_txt的路径
+            # 使用以前的邏輯：相對於root/dataset_split_txt的路徑
             self.flist = os.path.join(root, 'dataset_split_txt', flist)
+            
+            # 如果仍然不存在，嘗試在項目根目錄查找
+            if not os.path.exists(self.flist):
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                project_flist = os.path.join(project_root, os.path.basename(flist))
+                if os.path.exists(project_flist):
+                    self.flist = project_flist
+                else:
+                    raise FileNotFoundError(f"找不到文件列表: {flist}, {self.flist}, {project_flist}")
         
-        # 读取文件列表和mask区域信息
+        print(f"使用文件列表: {self.flist}")
+        
+        # 讀取文件列表和mask區域資訊
         self.img_paths = []
         self.mask_areas = []
         
@@ -186,19 +200,43 @@ class forgeryHSIDataset(Dataset):
         config_dir, img_name = self.img_paths[idx]
         mask_area = self.mask_areas[idx]
         
-        # 构建完整的图像路径
+        # 獲取項目根目錄
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        
+        # 使用用戶提供的實際資料路徑
+        real_data_root = '/ssd8/HyperForensics_Data/HyperForensics_Dataset'
+        
+        # 構建完整的圖像路徑
         if config_dir == 'Origin':
-            img_path = os.path.join(self.root, 'Origin', img_name)
+            # 嘗試多種可能的路徑，首先嘗試實際資料路徑
+            possible_paths = [
+                os.path.join(real_data_root, 'Origin', img_name),
+                os.path.join(self.root, 'Origin', img_name),
+                os.path.join(project_root, 'data', 'Origin', img_name),
+                os.path.join(project_root, 'Origin', img_name)
+            ]
         else:
-            # 避免重复的ADMM_ADAM路径
-            if 'ADMM_ADAM' in self.root:
-                img_path = os.path.join(self.root, config_dir, img_name)
-            else:
-                img_path = os.path.join(self.root, 'ADMM_ADAM', config_dir, img_name)
-
-        # 检查文件是否存在
-        if not os.path.exists(img_path):
-            raise FileNotFoundError(f"找不到文件：{img_path}")
+            # 嘗試多種可能的路徑，首先嘗試實際資料路徑
+            possible_paths = [
+                os.path.join(real_data_root, 'ADMM_ADAM', config_dir, img_name),
+                os.path.join(self.root, config_dir, img_name),
+                os.path.join(self.root, 'ADMM_ADAM', config_dir, img_name),
+                os.path.join(project_root, 'data', 'ADMM_ADAM', config_dir, img_name),
+                os.path.join(project_root, 'data', config_dir, img_name),
+                os.path.join(project_root, 'ADMM_ADAM', config_dir, img_name),
+                os.path.join(project_root, config_dir, img_name)
+            ]
+        
+        # 嘗試每個可能的路徑
+        img_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                img_path = path
+                break
+        
+        # 檢查文件是否存在
+        if img_path is None:
+            raise FileNotFoundError(f"找不到文件，嘗試了以下路徑：{possible_paths}")
 
         # 读取图像 => shape = [256, 256, 172]
         try:

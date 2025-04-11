@@ -3,9 +3,10 @@ import argparse
 import os
 import json
 import numpy as np
+import yaml
 
 from torch.utils.data import DataLoader
-from config import get_cfg_defaults
+from config import get_cfg
 from datasets import forgeryHSIDataset
 from models.hrnet import HRNetV2
 from metrics import SegMetrics, AdvMetrics
@@ -137,9 +138,12 @@ def evaluate_adversarial(model, orig_dataloader, adv_dataloader, device, n_class
 
 def main(args):
     # 讀取配置
-    cfg = get_cfg_defaults()
+    cfg = get_cfg()
     if args.config_path:
-        cfg.merge_from_file(args.config_path)
+        # 從文件加載配置
+        with open(args.config_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+            cfg.merge_from_dict(config_dict)
     cfg.freeze()
     
     # 設置設備

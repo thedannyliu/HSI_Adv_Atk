@@ -164,58 +164,98 @@ def visualize_results(image, label, prediction, save_path=None, show=False):
         plt.close(fig)
 
 
-def visualize_adversarial(original, adversarial, original_pred, adversarial_pred, save_path=None, show=False):
+def visualize_adversarial(original, adversarial, save_path=None):
     """
-    可視化對抗攻擊結果
-    
+    可視化原始圖像、對抗樣本和它們之間的差異（放大50倍）
     Args:
-        original: 原始高光譜影像 [C, H, W]
-        adversarial: 對抗高光譜影像 [C, H, W]
-        original_pred: 原始預測結果 [H, W]
-        adversarial_pred: 對抗預測結果 [H, W]
+        original: 原始圖像 (C, H, W)
+        adversarial: 對抗樣本 (C, H, W)
         save_path: 保存路徑
-        show: 是否顯示圖像
-        
-    Returns:
-        None
     """
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # 轉換為 numpy 數組
+    original = original.cpu().numpy() if torch.is_tensor(original) else original
+    adversarial = adversarial.cpu().numpy() if torch.is_tensor(adversarial) else adversarial
     
-    # 顯示原始影像（假彩色）
-    visualize_rgb_from_hsi(original, ax=axes[0, 0], title='Original Image')
-    
-    # 顯示原始預測
-    visualize_segmentation_mask(original_pred, ax=axes[0, 1], title='Original Prediction')
-    
-    # 顯示對抗影像（假彩色）
-    visualize_rgb_from_hsi(adversarial, ax=axes[1, 0], title='Adversarial Image')
-    
-    # 顯示對抗預測
-    visualize_segmentation_mask(adversarial_pred, ax=axes[1, 1], title='Adversarial Prediction')
-    
-    # 計算並顯示擾動（放大的）
+    # 計算擾動
     perturbation = adversarial - original
-    perturbation_magnitude = np.sqrt(np.sum(perturbation ** 2, axis=0))
-    vmax = np.percentile(perturbation_magnitude, 98)
-    im = axes[0, 2].imshow(perturbation_magnitude, cmap='hot', vmax=vmax)
-    axes[0, 2].set_title('Perturbation Magnitude')
-    plt.colorbar(im, ax=axes[0, 2])
+    l2_norm = np.sqrt(np.sum(perturbation**2))
     
-    # 顯示預測差異
-    diff = (original_pred != adversarial_pred).astype(np.float32)
-    axes[1, 2].imshow(diff, cmap='gray')
-    axes[1, 2].set_title('Prediction Differences')
+    # 確保數組是 3D 的
+    if original.ndim == 2:
+        original = original[np.newaxis, :, :]
+    if adversarial.ndim == 2:
+        adversarial = adversarial[np.newaxis, :, :]
+    
+    # 選擇三個波段進行可視化
+    if original.shape[0] > 3:
+        # 選擇具有最大方差的波段
+        variances = np.var(original, axis=(1, 2))
+        selected_bands = np.argsort(variances)[-3:]
+        original = original[selected_bands]
+        adversarial = adversarial[selected_bands]
+        # 同樣選擇相應的擾動波段
+        perturbation = perturbation[selected_bands]
+    
+    # 正規化每個通道，使用一致的範圍
+    original_rgb = np.zeros((original.shape[1], original.shape[2], 3))
+    adversarial_rgb = np.zeros((adversarial.shape[1], adversarial.shape[2], 3))
+    
+    for i in range(3):
+        # 合併原始和對抗數據，計算統一的百分位數
+        combined_data = np.concatenate([original[i].flatten(), adversarial[i].flatten()])
+        p2 = np.percentile(combined_data, 2)
+        p98 = np.percentile(combined_data, 98)
+        
+        if p98 - p2 > 1e-6:  # 避免除以接近零的值
+            original_rgb[:, :, i] = np.clip((original[i] - p2) / (p98 - p2), 0, 1)
+            adversarial_rgb[:, :, i] = np.clip((adversarial[i] - p2) / (p98 - p2), 0, 1)
+        else:
+            original_rgb[:, :, i] = np.clip(original[i], 0, 1)
+            adversarial_rgb[:, :, i] = np.clip(adversarial[i], 0, 1)
+    
+    # 處理擾動可視化 - 放大50倍
+    perturbation_vis = np.zeros((original.shape[1], original.shape[2], 3))
+    # 放大差異50倍
+    magnification = 50.0
+    scaled_perturbation = perturbation * magnification
+    
+    # 將放大後的擾動轉換為RGB表示
+    for i in range(3):
+        # 正規化放大後的擾動到 [0, 1] 範圍
+        # 使用絕對值便於可視化
+        max_pert = np.max(np.abs(scaled_perturbation[i])) if np.max(np.abs(scaled_perturbation[i])) > 1e-6 else 1.0
+        norm_pert = np.abs(scaled_perturbation[i]) / max_pert
+        perturbation_vis[:, :, i] = np.clip(norm_pert, 0, 1)
+    
+    # 創建一個圖形，包含三個子圖
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # 顯示原始圖像
+    axes[0].imshow(original_rgb)
+    axes[0].set_title("Original Image", fontsize=14)
+    axes[0].axis('off')
+    
+    # 顯示對抗樣本
+    axes[1].imshow(adversarial_rgb)
+    axes[1].set_title("Adversarial Image", fontsize=14)
+    axes[1].axis('off')
+    
+    # 顯示擾動（放大50倍）
+    axes[2].imshow(perturbation_vis)
+    axes[2].set_title("Difference × 50", fontsize=14)
+    axes[2].axis('off')
+    
+    # 添加L2 norm信息
+    fig.suptitle(f"L2 Norm: {l2_norm:.4f}", fontsize=12)
     
     plt.tight_layout()
     
+    # 保存圖像
     if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    
-    if show:
-        plt.show()
-    else:
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
         plt.close(fig)
+    
+    return fig
 
 
 def visualize_attack_comparison(original, adv_results, save_path=None, show=False):

@@ -6,49 +6,57 @@ GENERAL:
 
 CUDA:
   USE_CUDA: true  # 是否使用CUDA
-  CUDA_NUM: [0]  # CUDA設備ID
+  CUDA_NUM: [1]  # CUDA設備ID
 
 DATASET:
-  ROOT: "/path/to/dataset"  # 資料集根路徑
-  Train_data: "./files/train.txt"  # 訓練數據文件列表
-  Val_data: "./files/test.txt"  # 驗證數據文件列表
+  ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/ADMM_ADAM/"
+  Train_data: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/train_all.txt"  # 訓練數據文件列表
+  Val_data: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/val_all.txt"     # 驗證數據文件列表
   NUM_CLASSES: 2  # 類別數量
-  MEAN: 0.0  # 輸入數據均值
-  STD: 1.0  # 輸入數據標準差
+  MEAN: 872.2302212711304  # 輸入數據均值 (已計算)
+  STD: 1313.3993699607222  # 輸入數據標準差 (已計算)
 
 MODEL:
-  C: 32  # 模型的通道數
+  C: 12  # 模型的通道數
   IN_CHANNELS: 172  # 輸入通道數
-  USE_3D: false  # 是否使用3D卷積
-  USE_ATTENTION: false  # 是否使用注意力機制
+  USE_3D: true  # 是否使用3D卷積
+  USE_ATTENTION: true  # 啟用注意力機制
   ACTIVATION: "relu"  # 激活函數
 
 TEST:
-  CHECKPOINT: "./checkpoints/best_model.pth"  # 用於測試的檢查點
-  BATCH_SIZE: 4  # 測試批次大小
+  CHECKPOINT: "/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/checkpoints_dfcn/best.pth"
+  BATCH_SIZE: 2  # 測試批次大小
   NUM_WORKERS: 4  # 數據加載線程數
   RESULTS_PATH: "./output/test_results"  # 測試結果保存路徑
 
 ATTACK:
   SAVE_DIR: "./output/adversarial_samples"  # 對抗樣本保存目錄
-  BATCH_SIZE: 1  # 攻擊批次大小
+  BATCH_SIZE: 2  # 攻擊批次大小
   NUM_WORKERS: 4  # 數據加載線程數
   
-  # 攻擊參數
-  EPS: 0.05  # 擾動大小
-  ALPHA: 0.005  # 步長 (PGD)
+  # 攻擊參數 (0-1範圍)
+  EPS: 0.03  # 擾動大小 (調整為0-1範圍)
+  ALPHA: 0.001  # 步長 (PGD) (調整為0-1範圍)
   STEPS: 10  # 迭代步數 (PGD)
   
   # C&W 攻擊參數
-  C: 0.01  # 平衡係數
+  C: 0.1  # 平衡係數 (調整為0-1範圍)
   KAPPA: 0  # 置信度參數
-  LR: 0.01  # 學習率
+  LR: 0.001  # 學習率 (調整為0-1範圍)
   
   # DeepFool 攻擊參數
   MAX_ITER: 50  # 最大迭代次數
-  OVERSHOOT: 0.02  # 過度參數
+  OVERSHOOT: 0.02  # 過度參數 (已在0-1範圍)
 
   # 混合攻擊參數
   HYBRID:
-    SPATIAL_WEIGHT: 0.5  # 空間域攻擊的權重 (0-1)
+    SPATIAL_WEIGHT: 0.8  # 空間域攻擊的權重 (0-1)
     TARGET_BANDS: null   # 要攻擊的特定波段，null表示自動選擇重要波段
+
+GENERATE_ADV:
+  ATTACK_TYPE: "FGSM"          # 或 "PGD", "CW", "DeepFool"
+  DOMAIN: "hybrid"            # 或 "spatial", "spectral"
+  SPATIAL_WEIGHT: 0.8         # 混合攻擊中的空間權重 (與HYBRID.SPATIAL_WEIGHT保持一致)
+  TARGET_BANDS: null          # 要攻擊的特定波段
+  AUTO_EPS: true              # 是否自動調整擾動大小
+  MAX_EPS: 0.05               # 最大擾動大小 (調整為0-1範圍)
