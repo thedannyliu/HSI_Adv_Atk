@@ -16,3 +16,4 @@ checkpoints/
 checkpoints_dfcn/
 temp/
 output/
+results/

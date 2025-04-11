@@ -6,7 +6,7 @@ GENERAL:
 
 CUDA:
   USE_CUDA: true  # 是否使用CUDA
-  CUDA_NUM: [4]  # CUDA設備ID
+  CUDA_NUM: [1]  # CUDA設備ID
 
 DATASET:
   ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/ADMM_ADAM/"

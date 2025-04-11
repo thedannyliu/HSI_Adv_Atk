@@ -73,12 +73,73 @@ def load_checkpoint(model, optimizer, checkpoint_path, device):
 
 def get_datetime_str():
     """
-    獲取當前日期時間字符串
+    獲取當前時間的字串表示
     
     Returns:
-        str: 日期時間字符串，格式為 YYYYMMdd_HHMMSS
+        str: 當前時間的字串表示，格式為 YYYYMMDD_HHMMSS
     """
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def get_dataloader(batch_size, num_workers, root_dir=None, split='train', real_data_path=None):
+    """
+    獲取數據加載器
+    
+    Args:
+        batch_size (int): 批次大小
+        num_workers (int): 數據加載的工作進程數
+        root_dir (str): 數據根目錄，如果為None，則使用項目根目錄
+        split (str): 數據集分割，可為'train', 'val', 'test'
+        real_data_path (str): 實際數據路徑，如果提供則優先使用此路徑
+    
+    Returns:
+        DataLoader or tuple: 如果 split 為 'train'，則返回 (train_loader, val_loader)，否則只返回對應的加載器
+    """
+    from datasets.dataset import forgeryHSIDataset
+    
+    # 獲取項目根目錄
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    
+    # 如果沒有指定根目錄，則使用項目根目錄
+    if root_dir is None:
+        if real_data_path:
+            root_dir = real_data_path
+            print(f"使用實際數據路徑: {root_dir}")
+        else:
+            root_dir = project_root
+            print(f"未指定數據根目錄，使用項目根目錄: {root_dir}")
+    
+    # 獲取指定分割的加載器
+    def get_loader(current_split):
+        # 文件列表路徑，使用項目根目錄中的文件
+        flist_path = os.path.join(project_root, f'{current_split}_all.txt')
+        
+        # 構建數據集
+        dataset = forgeryHSIDataset(
+            root=root_dir,
+            flist=flist_path,
+            split=current_split,
+            target_type='mask',
+            transform=None
+        )
+        
+        # 構建數據加載器
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=(current_split == 'train'),
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        return loader
+    
+    # 如果請求訓練分割，則同時返回訓練和驗證加載器
+    if split == 'train':
+        train_loader = get_loader('train')
+        val_loader = get_loader('val')
+        return train_loader, val_loader
+    else:
+        # 否則返回請求的單個加載器
+        return get_loader(split)
 
 def visualize_results(image, mask, pred, save_path=None):
     """

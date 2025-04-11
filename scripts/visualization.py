@@ -36,6 +36,37 @@ def visualize_adversarial(orig_image, adv_image, label=None, pred_orig=None, pre
     if output_path:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
+    # 確保輸入是正確的形狀 [C, H, W]
+    if orig_image.ndim != 3 or adv_image.ndim != 3:
+        print(f"警告：輸入圖像維度不正確 - orig_image: {orig_image.shape}, adv_image: {adv_image.shape}")
+        # 如果是 [H, W] 形狀，擴展為 [1, H, W]
+        if orig_image.ndim == 2:
+            orig_image = np.expand_dims(orig_image, axis=0)
+        if adv_image.ndim == 2:
+            adv_image = np.expand_dims(adv_image, axis=0)
+        # 如果是 [B, C, H, W] 批次數據，取第一個樣本
+        elif orig_image.ndim == 4:
+            orig_image = orig_image[0]
+        if adv_image.ndim == 4:
+            adv_image = adv_image[0]
+    
+    # 修正可能超出範圍的對抗樣本值
+    print(f"原始圖像範圍: [{orig_image.min():.4f}, {orig_image.max():.4f}]")
+    print(f"對抗圖像範圍: [{adv_image.min():.4f}, {adv_image.max():.4f}]")
+    
+    # 計算原始圖像的統計信息，用於歸一化
+    orig_min, orig_max = orig_image.min(), orig_image.max()
+    orig_mean, orig_std = orig_image.mean(), orig_image.std()
+    
+    # 使用Z-score歸一化對抗樣本，然後調整到原始圖像的分佈
+    if abs(adv_image.min()) > 100 or abs(adv_image.max()) > 100:
+        print("檢測到對抗樣本值異常，進行歸一化處理")
+        # 如果對抗樣本範圍異常，使用原始圖像的統計特性進行歸一化
+        adv_mean, adv_std = adv_image.mean(), adv_image.std() + 1e-8
+        adv_image = (adv_image - adv_mean) / adv_std
+        adv_image = adv_image * orig_std + orig_mean
+        print(f"歸一化後對抗圖像範圍: [{adv_image.min():.4f}, {adv_image.max():.4f}]")
+    
     # 計算擾動
     perturbation = adv_image - orig_image
     
@@ -58,8 +89,30 @@ def visualize_adversarial(orig_image, adv_image, label=None, pred_orig=None, pre
     # 計算絕對擾動可視化
     rgb_pert = np.abs(rgb_adv - rgb_orig)
     # 增強擾動顯示
-    enhanced_factor = 5.0
+    enhanced_factor = 500.0
     rgb_pert = np.clip(rgb_pert * enhanced_factor, 0, 1)
+    
+    # 確保預測結果和標籤是正確的形狀 [H, W]
+    if label is not None and label.ndim != 2:
+        if label.ndim == 3 and label.shape[0] == 1:  # [1, H, W]
+            label = label[0]
+        elif label.ndim > 2:
+            print(f"警告：標籤維度不正確 - {label.shape}，取第一個維度")
+            label = label[0]
+    
+    if pred_orig is not None and pred_orig.ndim != 2:
+        if pred_orig.ndim == 3 and pred_orig.shape[0] == 1:  # [1, H, W]
+            pred_orig = pred_orig[0]
+        elif pred_orig.ndim > 2:
+            print(f"警告：原始預測維度不正確 - {pred_orig.shape}，取第一個維度")
+            pred_orig = pred_orig[0]
+    
+    if pred_adv is not None and pred_adv.ndim != 2:
+        if pred_adv.ndim == 3 and pred_adv.shape[0] == 1:  # [1, H, W]
+            pred_adv = pred_adv[0]
+        elif pred_adv.ndim > 2:
+            print(f"警告：對抗預測維度不正確 - {pred_adv.shape}，取第一個維度")
+            pred_adv = pred_adv[0]
     
     # 創建分析組合圖
     if label is not None and pred_orig is not None and pred_adv is not None:
@@ -68,41 +121,46 @@ def visualize_adversarial(orig_image, adv_image, label=None, pred_orig=None, pre
         # 1. 原始圖像
         plt.subplot(2, 3, 1)
         plt.imshow(rgb_orig)
-        plt.title('原始圖像')
+        plt.title('Original Image')
         plt.axis('off')
         
         # 2. 對抗圖像
         plt.subplot(2, 3, 2)
         plt.imshow(rgb_adv)
-        plt.title('對抗圖像')
+        plt.title('Adversarial Image')
         plt.axis('off')
         
         # 3. 擾動可視化（增強版）
         plt.subplot(2, 3, 3)
         plt.imshow(rgb_pert)
-        plt.title(f'擾動 (x{enhanced_factor:.1f})')
+        plt.title(f'Perturbation (x{enhanced_factor:.1f})')
         plt.axis('off')
         
         # 4. 真實標籤
         plt.subplot(2, 3, 4)
         plt.imshow(label, cmap='jet')
-        plt.title('真實標籤')
+        plt.title('Ground Truth')
         plt.axis('off')
         plt.colorbar(fraction=0.046, pad=0.04)
         
         # 5. 原始預測結果
         plt.subplot(2, 3, 5)
         plt.imshow(pred_orig, cmap='jet')
-        plt.title('原始預測')
+        plt.title('Original Prediction')
         plt.axis('off')
         plt.colorbar(fraction=0.046, pad=0.04)
         
         # 6. 對抗預測結果
         plt.subplot(2, 3, 6)
         plt.imshow(pred_adv, cmap='jet')
-        plt.title('對抗預測')
+        plt.title('Adversarial Prediction')
         plt.axis('off')
         plt.colorbar(fraction=0.046, pad=0.04)
+        
+        # 添加差異強調
+        plt.figtext(0.5, 0.01, 
+                    f'Prediction Changes: {np.sum(pred_orig != pred_adv) / pred_orig.size * 100:.2f}% pixels',
+                    ha='center', fontsize=12, bbox={"facecolor":"orange", "alpha":0.5, "pad":5})
     else:
         # 簡化版顯示（僅顯示圖像和擾動）
         plt.figure(figsize=(15, 5))
@@ -110,19 +168,19 @@ def visualize_adversarial(orig_image, adv_image, label=None, pred_orig=None, pre
         # 1. 原始圖像
         plt.subplot(1, 3, 1)
         plt.imshow(rgb_orig)
-        plt.title('原始圖像')
+        plt.title('Original Image')
         plt.axis('off')
         
         # 2. 對抗圖像
         plt.subplot(1, 3, 2)
         plt.imshow(rgb_adv)
-        plt.title('對抗圖像')
+        plt.title('Adversarial Image')
         plt.axis('off')
         
         # 3. 擾動可視化（增強版）
         plt.subplot(1, 3, 3)
         plt.imshow(rgb_pert)
-        plt.title(f'擾動 (x{enhanced_factor:.1f})')
+        plt.title(f'Perturbation (x{enhanced_factor:.1f})')
         plt.axis('off')
     
     # 保存圖像
