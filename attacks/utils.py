@@ -37,19 +37,16 @@ def unnormalize(images, mean, std):
 
 def zero_gradients(x):
     """
-    將梯度設為零
+    安全地將張量的梯度設為零
     
     Args:
         x (torch.Tensor): 需要清零梯度的張量
     """
-    if isinstance(x, torch.Tensor):
-        if x.grad is not None:
-            x.grad.detach_()
-            x.grad.zero_()
-    elif isinstance(x, list) or isinstance(x, tuple):
-        for elem in x:
-            zero_gradients(elem)
-            
+    if x.grad is not None:
+        x.grad.detach_()
+        x.grad.zero_()
+    return x
+
 def get_important_bands(hsi_data, n_bands=10):
     """
     根據高光譜資料的方差選擇重要波段

@@ -88,8 +88,8 @@ def visualize_adversarial(orig_image, adv_image, label=None, pred_orig=None, pre
     
     # 計算絕對擾動可視化
     rgb_pert = np.abs(rgb_adv - rgb_orig)
-    # 增強擾動顯示
-    enhanced_factor = 500.0
+    # 放大擾動以便可視化
+    enhanced_factor = 2000.0
     rgb_pert = np.clip(rgb_pert * enhanced_factor, 0, 1)
     
     # 確保預測結果和標籤是正確的形狀 [H, W]
