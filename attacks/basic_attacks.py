@@ -168,23 +168,58 @@ def pgd_attack(model, images, labels, eps, alpha, steps, criterion, device, mean
     # 確保標籤是 Long 類型
     labels = labels.clone().detach().to(device).long()
     
-    # 計算自適應擾動大小
+    # 添加數據範圍自適應的擾動放大因子
+    # 高光譜數據通常範圍很大，需要更大的擾動才能產生明顯效果
+    data_range_factor = 10.0  # 基本放大因子
+    
+    # 根據數據估算合適的放大因子
+    with torch.no_grad():
+        if mean is not None and std is not None:
+            orig_images_unnorm = unnormalize(images.clone(), mean, std)
+            data_range = torch.max(orig_images_unnorm) - torch.min(orig_images_unnorm)
+            if data_range > 1.0:  # 高光譜數據通常範圍較大
+                # 根據數據範圍動態調整放大因子，最小10倍，最大50倍
+                data_range_factor = max(min(data_range / 10.0, 50.0), 10.0)
+    
+    print(f"基本PGD: 使用數據範圍自適應放大因子: {data_range_factor:.2f}")
+    
+    # 應用數據範圍因子到擾動上
+    effective_eps = eps * data_range_factor
+    effective_alpha = alpha * data_range_factor
+    
+    # 如果使用自適應擾動大小，也需要放大
     if use_adaptive_eps:
-        adaptive_eps = adaptive_perturbation_size(images, labels, model, eps, min_eps, max_eps)
+        min_eps = min_eps * data_range_factor
+        max_eps = max_eps * data_range_factor
+        adaptive_eps = adaptive_perturbation_size(images, labels, model, effective_eps, min_eps, max_eps)
     
-    # 正規化原始圖像
-    images_orig_norm = normalize(images.clone(), mean, std)
+    # 直接在正規化域中操作
+    # 如果有提供mean和std，確保圖像已經正規化
+    if mean is not None and std is not None:
+        images_norm = normalize(images.clone(), mean, std).to(device)
+    else:
+        images_norm = images.clone().detach().to(device)
     
-    # 初始化對抗樣本為原始圖像
-    adv_images = images.clone().detach()
+    adv_images_norm = images_norm.clone().detach()
+    
+    B, C, H, W = images_norm.shape
     
     # 如果使用光譜重要性分析，先計算重要波段
     if use_spectral_importance:
         band_importance = spectral_importance_analysis(images, labels, model, device)
+        important_bands = []
+        
+        # 選擇重要性最高的波段直到達到閾值
+        sorted_bands = torch.argsort(band_importance, descending=True)
+        cumulative_importance = 0
+        for band_idx in sorted_bands:
+            important_bands.append(band_idx.item())
+            cumulative_importance += band_importance[band_idx]
+            if cumulative_importance >= spectral_threshold:
+                break
+        print(f"基本PGD: 選擇了 {len(important_bands)}/{C} 個波段，累積重要性: {cumulative_importance:.4f}")
     
     for i in range(steps):
-        # 正規化當前對抗樣本
-        adv_images_norm = normalize(adv_images, mean, std)
         adv_images_norm.requires_grad = True
         
         # 前向傳播
@@ -208,31 +243,67 @@ def pgd_attack(model, images, labels, eps, alpha, steps, criterion, device, mean
         # 應用光譜重要性分析結果
         if use_spectral_importance:
             # 選擇性地應用擾動（只擾動重要波段）
-            perturbation = selective_perturbation(alpha * grad_sign, band_importance, spectral_threshold)
+            spectral_mask = torch.zeros((B, C, 1, 1), device=device)
+            for band_idx in important_bands:
+                spectral_mask[:, band_idx, 0, 0] = 1.0
+            masked_grad_sign = grad_sign * spectral_mask.expand_as(grad_sign)
+            perturbation = effective_alpha * masked_grad_sign
         else:
-            perturbation = alpha * grad_sign
+            perturbation = effective_alpha * grad_sign
         
         # 添加擾動
-        adv_images_norm = adv_images_norm + perturbation
+        adv_images_norm = adv_images_norm.detach() + perturbation
         
         # 計算與原始圖像的差距
         if use_adaptive_eps:
-            # 使用自適應的epsilon
-            delta = adv_images_norm - images_orig_norm
-            delta = torch.clamp(delta, -adaptive_eps, adaptive_eps)
+            # 為每個樣本單獨應用擾動限制
+            for b in range(B):
+                eta = adv_images_norm[b] - images_norm[b]
+                eta = torch.clamp(eta, -adaptive_eps[b, 0, 0, 0].item(), adaptive_eps[b, 0, 0, 0].item())
+                adv_images_norm[b] = images_norm[b] + eta
         else:
             # 使用固定的epsilon
-            delta = adv_images_norm - images_orig_norm
-            delta = torch.clamp(delta, -eps, eps)
-        
-        # 投影回有效範圍
-        adv_images_norm = images_orig_norm + delta
-        
-        # 不再限制到0-1範圍，而是讓反歸一化函數處理映射回原始範圍
-        
-        # 反正規化
-        adv_images = unnormalize(adv_images_norm, mean, std)
-        
+            eta = adv_images_norm - images_norm
+            eta = torch.clamp(eta, -effective_eps, effective_eps)
+            adv_images_norm = images_norm + eta
+    
+    # 計算原始域的擾動大小
+    with torch.no_grad():
+        if mean is not None and std is not None:
+            images_unnorm = unnormalize(images, mean, std)
+            adv_images_unnorm = unnormalize(adv_images_norm, mean, std)
+            actual_perturbation = adv_images_unnorm - images_unnorm
+            actual_perturbation_l_inf = torch.norm(actual_perturbation.view(B, -1), p=float('inf'), dim=1)
+            actual_perturbation_l2 = torch.norm(actual_perturbation.view(B, -1), p=2, dim=1)
+            
+            print(f"基本PGD: 正規化域平均L∞擾動大小: {torch.norm((adv_images_norm - images_norm).view(B, -1), p=float('inf'), dim=1).mean().item():.4f}")
+            print(f"基本PGD: 原始域平均L∞擾動大小: {actual_perturbation_l_inf.mean().item():.4f}")
+            print(f"基本PGD: 原始域平均L2擾動大小: {actual_perturbation_l2.mean().item():.4f}")
+            
+            # 測試攻擊效果
+            orig_output = model(images_norm)
+            adv_output = model(adv_images_norm)
+            if isinstance(orig_output, tuple):
+                orig_output = orig_output[0]
+            if isinstance(adv_output, tuple):
+                adv_output = adv_output[0]
+            orig_pred = orig_output.argmax(1)
+            adv_pred = adv_output.argmax(1)
+            success_rate = (orig_pred != adv_pred).float().mean()
+            print(f"基本PGD: 攻擊成功率: {success_rate.item():.4f}")
+            
+            # 反正規化最終結果
+            adv_images = adv_images_unnorm
+        else:
+            # 如果沒有提供正規化參數，直接返回正規化後的結果
+            adv_images = adv_images_norm
+            
+            # 輸出基本擾動信息
+            perturbation_l_inf = torch.norm((adv_images_norm - images_norm).view(B, -1), p=float('inf'), dim=1)
+            perturbation_l2 = torch.norm((adv_images_norm - images_norm).view(B, -1), p=2, dim=1)
+            print(f"基本PGD: 平均L∞擾動大小: {perturbation_l_inf.mean().item():.4f}")
+            print(f"基本PGD: 平均L2擾動大小: {perturbation_l2.mean().item():.4f}")
+    
     # 應用感知限制
     if apply_perceptual_constraint:
         adv_images = perceptual_constraint(

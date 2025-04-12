@@ -258,7 +258,7 @@ def main():
         elif attack_domain == 'hybrid':
             attack_fn = deepfool_hybrid_attack
         else:
-            attack_fn = deepfool_attack
+            attack_fn = deepfool_spectral_attack
     elif attack_method == 'cw':
         if attack_domain == 'spatial':
             attack_fn = cw_spatial_attack
