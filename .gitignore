@@ -1,20 +1,44 @@
+# Python cache files
 **/__pycache__/
-logs/
-output/
+*.py[cod]
+*$py.class
+
+# Model weights and checkpoints
 *.pth
 *.ckpt
 *.pt
 *.h5
+
+# Data files
 *.npy
 *.npz
 *.pkl
 *.json
 *.csv
 *.txt
+
+# Exceptions
 !requirements.txt
+!train_all.txt
+!val_all.txt
+!test_all.txt
+!info_csv.csv
+
+# Project specific directories
+## Logs and checkpoints
+logs/
 checkpoints/
 checkpoints_dfcn/
-temp/
+
+## Output and results
 output/
 results/
-results/adversarial
+results/adversarial/
+
+## Temporary files
+temp/
+
+# Absolute paths - for explicit clarity
+/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/results/
+/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/temp/
+/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/checkpoints/
