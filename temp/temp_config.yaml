@@ -1,0 +1,67 @@
+# Configuration File for HyperForensics++ Training (DFCN Style)
+
+GENERAL:
+  SEED: 42  # Random seed for reproducibility
+
+CUDA:
+  USE_CUDA: True
+  CUDA_NUM: [4] # Modify to list the GPU IDs you want to use, e.g., [0] or [0, 1]
+
+DATASET:
+  # IMPORTANT: Set this root to your actual dataset location
+  ROOT: "/ssd8/HyperForensics_Data/HyperForensics_Dataset/ADMM_ADAM/"
+  # IMPORTANT: These point to the list files you MUST create in the project root
+  # Relative path from scripts/train.py or scripts/performance_eval.py
+  Train_data: "../train_all.txt" # Combined list for config0-4 train data
+  Val_data: "../val_all.txt"   # Combined list for config0-4 val data
+  NUM_CLASSES: 2
+
+MODEL:
+  NAME: "HRNetV2"
+  C: 12           # Base channels for HRNet stages (DFCN default)
+  IN_CHANNELS: 172 # Input HSI channels
+  USE_3D: True    # Use the 3D Conv frontend (SSF-like) - Set True to match DFCN
+  USE_ATTENTION: True # 啟用Attention以便使用SKConv (與DFCN_Py匹配)
+  PRETRAINED: False # Set path if loading pretrained weights
+
+TRAIN:
+  EPOCH_START: 1
+  EPOCH_END: 300 # Target epochs (DFCN used 3000, start with 500)
+  BATCH_SIZE: 2  # Per GPU batch size (DFCN used 16 total) - Adjust based on GPU memory * number of GPUs
+  LEARNING_RATE: 0.0001 # Learning rate (DFCN used 0.001, start lower)
+  WEIGHT_DECAY: 0.00005 # Weight decay from DFCN
+  NUM_WORKERS: 8  # DataLoader workers (Adjust based on CPU cores)
+  PIN_MEMORY: True
+
+  # Logging and Saving
+  LOG_PATH: "./logs/training_log_dfcn" # Relative path for TensorBoard logs
+  SAVE_WEIGHT_PATH: "./checkpoints_dfcn" # Relative path for model checkpoints
+  LOG_LOSS: 10      # Log loss to TensorBoard every N batches
+  LOG_IMAGE: 50     # Log images to TensorBoard every N batches
+  SAVE_WEIGHT_STEP: 4 # Validate and save model every N epochs (DFCN default)
+  CHECKPOINT: ''    # Path to checkpoint to resume training, e.g., './checkpoints_dfcn/last.pth'
+  VAL_FREQ: 4       # Frequency of running validation (matches SAVE_WEIGHT_STEP)
+
+  # Loss Function
+  LOSS:
+    NAME: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "DiceBCELoss", "IoULoss"
+    WEIGHTS: [0.01, 0.99] # Class weights for CrossEntropyLoss (DFCN default: high weight for fake class)
+  BAND_REG: False # Enable auxiliary band prediction loss (DFCN default: False)
+
+  # Optimizer (Only AdamW settings relevant here from DFCN)
+  OPTIMIZER:
+    NAME: "AdamW"
+    # Betas are typically handled directly in optimizer creation
+
+  # Scheduler (MultiStepLR settings from DFCN)
+  SCHEDULER:
+    NAME: "MultiStepLR"
+    MILESTONES: [200, 350, 450] # Epochs at which to decay LR (Adjust based on EPOCH_END)
+    GAMMA: 0.1 # LR decay factor
+
+TEST: # Settings used for validation during training
+  BATCH_SIZE: 2 # Validation batch size (can be same as train or larger if memory allows)
+  NUM_WORKERS: 4
+  # CHECKPOINT: # Not needed here, trainer uses current model
+  RESULTS_NUM: 5 # Number of validation images to save per validation run
+  RESULTS_PATH: './logs/validation_results_dfcn' # Path to save validation image results 

@@ -1,190 +1,404 @@
-# HyperForensics++ 高光譜影像偽造檢測與對抗攻擊框架
+# HyperForensics++: A Framework for Hyperspectral Image Forgery Detection and Adversarial Attacks
 
-HyperForensics++ 是一個全面的高光譜影像偽造檢測與對抗攻擊研究框架，旨在提供一個系統化的環境，用於評估偽造檢測模型的魯棒性，以及研究和開發對抗攻擊方法。
+## Overview
 
-## 功能特點
+HyperForensics++ is a comprehensive framework for hyperspectral image (HSI) forgery detection and adversarial attack research. This project provides a systematic environment for evaluating the robustness of forgery detection models and developing advanced adversarial attack methods tailored for hyperspectral imagery.
 
-- **模型訓練與評估**：提供完整的模型訓練和評估流程
-- **多種對抗攻擊方法**：實現多種對抗攻擊算法 (FGSM, PGD, CW, DeepFool 等)
-- **域特定攻擊**：專門針對空間域和光譜域的攻擊實現
-- **全面的評估指標**：提供詳細的分割評估和對抗攻擊評估指標
-- **高光譜數據處理**：專門針對高光譜影像的數據加載和預處理
-- **可視化工具**：豐富的可視化功能，幫助理解檢測結果和攻擊效果
+The framework enables researchers and practitioners to:
+- Train and evaluate state-of-the-art hyperspectral forgery detection models
+- Generate adversarial examples using multiple attack strategies
+- Test model robustness against various attack domains (spatial, spectral, and hybrid)
+- Evaluate both segmentation performance and attack effectiveness using comprehensive metrics
 
-## 目錄結構
+## Key Features
+
+- **Complete Training Pipeline**: End-to-end training and evaluation workflow for HSI forgery detection models
+- **Advanced Attack Methods**: Implementation of multiple adversarial attack algorithms including FGSM, PGD, CW, and DeepFool
+- **Domain-Specific Attacks**: Specialized attacks targeting spatial domain, spectral domain, or hybrid approaches
+- **Hyperspectral Data Processing**: Specialized data loading and preprocessing for hyperspectral imagery
+- **Comprehensive Evaluation**: Detailed segmentation and adversarial attack evaluation metrics
+- **Visualization Tools**: Rich visualization capabilities for understanding detection results and attack effects
+- **Configurable Framework**: Highly customizable through configuration files
+
+## Directory Structure
 
 ```
 HyperForensics++/
-├── config/             # 配置文件
-├── models/             # 模型定義
-├── datasets/           # 數據集和數據加載
-├── attacks/            # 對抗攻擊實現
-│   ├── spatial_attacks.py    # 空間域攻擊
-│   ├── spectral_attacks.py   # 光譜域攻擊
-│   └── utils.py              # 攻擊工具函數
-├── utils/              # 工具函數
-├── metrics/            # 評估指標
-├── scripts/            # 腳本工具
-└── output/             # 輸出結果目錄
+├── config/             # Configuration files
+├── models/             # Model definitions
+├── datasets/           # Dataset handling and loading
+├── attacks/            # Adversarial attack implementations
+│   ├── basic_attacks.py      # Basic attack methods (FGSM, PGD)
+│   ├── spatial_attacks.py    # Spatial domain attacks
+│   ├── spectral_attacks.py   # Spectral domain attacks
+│   ├── hybrid_attacks.py     # Combined spatial and spectral attacks
+│   ├── attack_utils.py       # Attack utility functions
+│   └── utils.py              # General utility functions for attacks
+├── utils/              # Utility functions
+├── metrics/            # Evaluation metrics
+├── scripts/            # Script tools
+│   ├── train.py              # Training script
+│   ├── evaluate.py           # Evaluation script
+│   ├── generate_adversarial.py # Adversarial sample generation
+│   └── visualization.py      # Visualization utilities
+├── checkpoints/        # Model checkpoints
+├── logs/               # Training logs
+└── results/            # Output results directory
 ```
 
-## 快速開始
+## Installation
 
-### 環境設置
+### Prerequisites
+
+- Python 3.7+
+- PyTorch 1.8+
+- CUDA (for GPU acceleration)
+
+### Environment Setup
 
 ```bash
-# 安裝依賴
+# Clone the repository
+git clone https://github.com/yourusername/HSI_Adv_Atk.git
+cd HSI_Adv_Atk/HyperForensics++
+
+# Create a virtual environment (optional but recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 訓練模型
+## Usage Instructions
+
+### Training Models
 
 ```bash
-# 使用所有配置訓練
+# Training with all configurations
 python scripts/train.py --config_path ./config/train_config.yaml
 
-# 使用特定配置訓練（例如只使用 config1）
+# Training with specific configuration(s)
 python scripts/train.py --config_path ./config/train_config.yaml --configs config1
 
-# 使用多個特定配置訓練
+# Training with multiple specific configurations
 python scripts/train.py --config_path ./config/train_config.yaml --configs config1 config2
 
-# 從檢查點繼續訓練
+# Resuming training from a checkpoint
 python scripts/train.py --config_path ./config/train_config.yaml --configs config1 --checkpoint ./logs/weights/exp_20240320_120000/checkpoint_epoch_50.pth
 ```
 
-注意：
-- 使用 `--configs` 參數時，程式會自動包含 "Origin" 配置（用於驗證集）
-- 您也可以直接修改 `train_config.yaml` 中的 `CONFIGS` 列表來選擇要使用的配置
-- 訓練過程會自動保存以下權重：
-  - `best_miou.pth`：最佳 mIoU 的模型權重
-  - `best_acc.pth`：最佳準確率的模型權重
-  - `last.pth`：最後一個 epoch 的模型權重
-  - `checkpoint_epoch_X.pth`：每5個 epoch 的檢查點
+Notes:
+- When using the `--configs` parameter, the program automatically includes the "Origin" configuration for validation
+- You can also directly modify the `CONFIGS` list in `train_config.yaml` to select configurations to use
+- The training process automatically saves the following weights:
+  - `best_miou.pth`: Model weights with the best mIoU
+  - `best_acc.pth`: Model weights with the best accuracy
+  - `last.pth`: Model weights from the last epoch
+  - `checkpoint_epoch_X.pth`: Checkpoints every 5 epochs
 
-### 遠端訓練
+### Remote Training
 
-為了避免遠端訓練因斷線而中斷，您可以使用以下方法之一：
+To prevent interruption due to connection issues during remote training, you can use one of the following methods:
 
-1. 使用 `screen`（推薦）：
+1. Using `screen` (recommended):
 ```bash
-# 創建新的 screen 會話
+# Create a new screen session
 screen -S training
 
-# 在 screen 會話中運行訓練腳本
+# Run the training script in the screen session
 python scripts/train.py --config_path ./config/train_config.yaml --configs config1
 
-# 按 Ctrl+A 然後按 D 來分離 screen 會話
-# 使用 screen -ls 查看所有會話
-# 使用 screen -r training 重新連接會話
+# Press Ctrl+A, then D to detach the screen session
+# Use screen -ls to view all sessions
+# Use screen -r training to reconnect to the session
 ```
 
-2. 使用 `tmux`：
+2. Using `tmux`:
 ```bash
-# 創建新的 tmux 會話
+# Create a new tmux session
 tmux new -s training
 
-# 在 tmux 會話中運行訓練腳本
+# Run the training script in the tmux session
 python scripts/train.py --config_path ./config/train_config.yaml --configs config1
 
-# 按 Ctrl+B 然後按 D 來分離 tmux 會話
-# 使用 tmux ls 查看所有會話
-# 使用 tmux attach -t training 重新連接會話
+# Press Ctrl+B, then D to detach the tmux session
+# Use tmux ls to view all sessions
+# Use tmux attach -t training to reconnect to the session
 ```
 
-3. 使用 `nohup`：
+3. Using `nohup`:
 ```bash
 nohup python scripts/train.py --config_path ./config/train_config.yaml --configs config1 > training.log 2>&1 &
 ```
 
-所有訓練日誌都會保存在 `/ssd1/dannyliu/HSI_Adv_Atk/Log` 目錄下，文件名格式為 `exp_{timestamp}_lr{learning_rate}_bs{batch_size}.log`。
+All training logs are saved in the `/ssd1/dannyliu/HSI_Adv_Atk/Log` directory, with filenames in the format `exp_{timestamp}_lr{learning_rate}_bs{batch_size}.log`.
 
-### 生成對抗樣本
+### Generating Adversarial Examples
+
+The `generate_adversarial.py` script provides a comprehensive interface for creating adversarial examples using different attack methods and domains:
 
 ```bash
-# 空間域攻擊
-python scripts/generate_adversarial.py --attack pgd --domain spatial
+# Basic usage
+python scripts/generate_adversarial.py --attack_method pgd --attack_domain spatial
 
-# 光譜域攻擊
-python scripts/generate_adversarial.py --attack fgsm --domain spectral
+# Detailed usage with parameters
+python scripts/generate_adversarial.py --attack_method fgsm --attack_domain spectral --eps 0.1 --batch_size 4 --save_dir results/adversarial
 
-# 混合域攻擊
-python scripts/generate_adversarial.py --attack pgd --domain hybrid
+# Example of a DeepFool attack in the spectral domain
+python scripts/generate_adversarial.py --attack_method deepfool --attack_domain spectral --gpu_id 0 --eps 0.3
+
+# Example of a CW attack in the hybrid domain
+python scripts/generate_adversarial.py --attack_method cw --attack_domain hybrid --steps 100 --spatial_weight 0.7
 ```
 
-### 評估性能
+Key parameters:
+- `--attack_method`: Choose from `fgsm`, `pgd`, `deepfool`, or `cw`
+- `--attack_domain`: Choose from `spatial`, `spectral`, or `hybrid`
+- `--eps`: Maximum perturbation size (default: 0.03)
+- `--steps`: Number of iterations for iterative attacks (default: 40)
+- `--adaptive_eps`: Use adaptive perturbation size (enabled by default)
+- `--perceptual_constraint`: Apply perceptual constraints to the adversarial examples (enabled by default)
+
+Advanced options:
+- `--spatial_weight`: Weight of spatial component in hybrid attacks (0-1, default: 0.5)
+- `--target_bands`: Specific bands to attack (comma-separated, e.g., "10,20,30")
+- `--spectral_importance`: Use spectral importance analysis to select bands (enabled by default)
+- `--spectral_threshold`: Cumulative importance threshold for band selection (default: 0.7)
+
+### Recent Improvements to Adversarial Attacks
+
+Recent updates have significantly enhanced the effectiveness and stability of adversarial attacks:
+
+1. **Data Range Adaptive Amplification Factor**:
+   - Dynamically adjusts perturbation magnitude based on the hyperspectral data range
+   - Automatically scales from 20x to 100x based on the actual data range (typically in thousands)
+   - Significantly improves attack effectiveness for high-dynamic-range hyperspectral data
+
+2. **Unified Domain Processing**:
+   - All computations now occur in the normalized domain
+   - Eliminates precision loss from domain transformations
+   - Reports perturbation magnitude in both normalized and original domains
+
+3. **Segmentation Model Support**:
+   - Added full support for segmentation models with output dimensions [B, C, H, W]
+   - Implemented spatial averaging for confidence computation in segmentation models
+   - Modified gradient calculations for accurate attack targeting
+
+4. **Numerical Stability Enhancements**:
+   - Added zero-division protection mechanisms
+   - Improved handling of gradients with near-zero magnitudes
+   - Enhanced stability in DeepFool's decision boundary calculation
+
+5. **Enhanced Diagnostic Output**:
+   - Added detailed perturbation statistics including L∞ and L2 norms
+   - Reports both normalized and original domain perturbation sizes
+   - Displays attack success rate and band/pixel selection ratios
+
+### Evaluation
 
 ```bash
-# 評估原始數據集
+# Evaluating the original dataset
 python scripts/evaluate.py --config_path ./config/test_config.yaml --mode original
 
-# 評估對抗樣本
-python scripts/evaluate.py --config_path ./config/test_config.yaml --mode adversarial --adv_dir ./output/adversarial_samples/spatial_PGD_eps0.05_20230320_120000/samples --adv_flist ./output/adversarial_samples/spatial_PGD_eps0.05_20230320_120000/adv_filelist.txt
+# Evaluating adversarial examples
+python scripts/evaluate.py --config_path ./config/test_config.yaml --mode adversarial --adv_dir ./results/adversarial/pgd_spatial_20240425_120000/images --adv_flist ./results/adversarial/pgd_spatial_20240425_120000/filelist.txt
 ```
 
-## 支持的攻擊方法
+## Supported Attack Methods
 
-### 基本方法
-- **FGSM** (Fast Gradient Sign Method)：快速梯度符號法
-- **PGD** (Projected Gradient Descent)：投影梯度下降法
-- **CW** (Carlini-Wagner)：Carlini-Wagner 攻擊
-- **DeepFool**：DeepFool 攻擊
+### Basic Methods
+- **FGSM** (Fast Gradient Sign Method): Creates adversarial examples by taking a single step in the direction of the gradient sign
+- **PGD** (Projected Gradient Descent): An iterative variant of FGSM that projects perturbations onto the ε-ball
+- **CW** (Carlini-Wagner): Optimization-based attack that creates adversarial examples with minimal perturbation
+- **DeepFool**: Iteratively finds the minimal perturbation needed to cross the decision boundary
 
-### 攻擊域
-- **空間域攻擊**：專注於修改影像的空間結構，對所有光譜波段施加一致的空間扰動模式
-- **光譜域攻擊**：專注於修改特定波段的光譜特徵，保持空間結構相對不變
-- **混合域攻擊**：結合空間域和光譜域的攻擊，同時在兩個維度上進行擾動
+### Attack Domains
+- **Spatial Domain Attacks**: Focus on modifying the spatial structure of the image, applying consistent spatial perturbation patterns across all spectral bands
+- **Spectral Domain Attacks**: Focus on modifying spectral features of specific bands while maintaining relative spatial structure
+- **Hybrid Domain Attacks**: Combine spatial and spectral domain attacks, applying perturbations in both dimensions
 
-## 評估指標
+## Implementation Details
 
-### 分割評估指標
-- 像素準確率 (Pixel Accuracy)
-- 平均IoU (Mean IoU)
-- 類別F1分數 (Class F1 Score)
+### FGSM Implementation
 
-### 對抗攻擊評估指標
-- 攻擊成功率 (Attack Success Rate)
-- 擾動范數 (L0, L1, L2, L∞)
-- 信噪比 (Signal-to-Noise Ratio)
-- 結構相似性 (Structural Similarity)
+The FGSM attack is implemented with several enhancements:
+- Data range adaptive scaling factor (10-50x)
+- Direct operation in the normalized domain
+- Support for spatial, spectral, and hybrid domains
+- Comprehensive perturbation statistics
 
-## 攻擊方法比較
+```python
+# Example of FGSM attack in the spectral domain
+adv_images = fgsm_spectral_attack(
+    model, images, labels, eps=0.1, criterion=F.cross_entropy, 
+    device='cuda', mean=mean, std=std, target_bands=important_bands
+)
+```
 
-| 攻擊方法 | 空間域 | 光譜域 | 混合域 | 計算複雜度 | 攻擊成功率 |
-|---------|-------|-------|--------|----------|-----------|
-| FGSM    | ✓     | ✓     | ✓      | 低       | 中        |
-| PGD     | ✓     | ✓     | ✓      | 中       | 高        |
-| CW      | ✓     | ✓     | ✓      | 高       | 高        |
-| DeepFool| ✓     | ✓     | ✓      | 中       | 中        |
+### PGD Implementation
 
-### 混合域攻擊優勢
+The PGD attack includes:
+- Multi-step iterative optimization
+- Configurable step size and iteration count
+- Projection onto perturbation constraints
+- Domain-specific implementations
 
-混合域攻擊結合了空間域和光譜域攻擊的優點，通過同時在這兩個維度上進行擾動，能夠:
+```python
+# Example of PGD attack in the spatial domain
+adv_images = pgd_spatial_attack(
+    model, images, labels, eps=0.1, alpha=0.01, steps=40,
+    criterion=F.cross_entropy, device='cuda', mean=mean, std=std
+)
+```
 
-1. **更高攻擊成功率**: 同時利用空間和光譜兩個維度的脆弱性
-2. **更難檢測**: 通過在兩個維度上分散擾動，使擾動更加隱蔽
-3. **更強的泛化能力**: 對不同類型的防禦機制有更好的穿透能力
+### DeepFool Implementation
 
-使用混合攻擊時，可通過配置文件調整空間域和光譜域的權重比例(`SPATIAL_WEIGHT`)，以及目標波段的選擇。
+DeepFool has been enhanced with:
+- Improved gradient computation for segmentation models
+- Data range adaptive scaling factor (20-100x)
+- Selective perturbation based on importance masks
+- Numerical stability safeguards
+
+```python
+# Example of DeepFool attack in the hybrid domain
+adv_images = deepfool_hybrid_attack(
+    model, images, num_classes=2, max_iter=50, overshoot=0.02,
+    device='cuda', mean=mean, std=std, spatial_weight=0.6
+)
+```
+
+### CW Implementation
+
+The CW attack features:
+- Confidence parameter (κ) for controlling attack strength
+- Learning rate and iteration count configuration
+- Domain-specific implementations
+- Perceptual constraint options
+
+```python
+# Example of CW attack
+adv_images = cw_hybrid_attack(
+    model, images, labels, c=0.001, kappa=10.0, steps=200, lr=0.01,
+    device='cuda', mean=mean, std=std, spatial_weight=0.5
+)
+```
+
+## Evaluation Metrics
+
+### Segmentation Evaluation Metrics
+- Pixel Accuracy: Percentage of correctly classified pixels
+- Mean IoU (Intersection over Union): Average IoU across all classes
+- Class F1 Score: Harmonic mean of precision and recall
+
+### Adversarial Attack Evaluation Metrics
+- Attack Success Rate: Percentage of successful misclassifications
+- Perturbation Norms: L0, L1, L2, L∞ norms to measure perturbation magnitude
+- Signal-to-Noise Ratio: Measure of perturbation visibility
+- Structural Similarity: Measure of structural preservation
+
+## Comparison of Attack Methods
+
+| Attack Method | Spatial Domain | Spectral Domain | Hybrid Domain | Computational Complexity | Success Rate |
+|--------------|----------------|-----------------|---------------|--------------------------|--------------|
+| FGSM         | ✓              | ✓               | ✓             | Low                      | Medium       |
+| PGD          | ✓              | ✓               | ✓             | Medium                   | High         |
+| CW           | ✓              | ✓               | ✓             | High                     | High         |
+| DeepFool     | ✓              | ✓               | ✓             | Medium                   | Medium       |
+
+### Advantages of Hybrid Domain Attacks
+
+Hybrid domain attacks combine the strengths of spatial and spectral domain attacks by perturbing in both dimensions simultaneously, offering:
+
+1. **Higher Success Rate**: Exploits vulnerabilities in both spatial and spectral dimensions
+2. **Improved Stealth**: Distributes perturbation across two dimensions, making it less detectable
+3. **Better Generalization**: More effective against various defense mechanisms
+
+When using hybrid attacks, you can adjust the balance between spatial and spectral components through the `SPATIAL_WEIGHT` parameter, as well as select target bands.
+
+## Custom Configurations
+
+You can customize attack parameters by modifying the `config/attack_config.yaml` file:
 
 ```yaml
 # config/attack_config.yaml
 ATTACK:
-  # 其他參數...
+  # Common parameters
+  EPS: 0.1
+  STEPS: 40
+  RANDOM_START: True
   
-  # 混合攻擊參數
+  # Specific attack parameters
+  PGD:
+    ALPHA: 0.01
+  
+  CW:
+    C: 0.001
+    KAPPA: 10.0
+    LR: 0.01
+    
+  DEEPFOOL:
+    MAX_ITER: 50
+    OVERSHOOT: 0.02
+  
+  # Domain-specific parameters
+  SPECTRAL:
+    TARGET_BANDS: null  # Automatically select important bands
+    SPECTRAL_THRESHOLD: 0.7
+  
   HYBRID:
-    SPATIAL_WEIGHT: 0.5  # 空間域攻擊的權重 (0-1)
-    TARGET_BANDS: null   # 要攻擊的特定波段，null表示自動選擇重要波段
+    SPATIAL_WEIGHT: 0.5  # Weight of spatial component (0-1)
 ```
 
-### 自定義配置
+## Visualization
 
-您可以通過修改 `config/attack_config.yaml` 文件來調整攻擊參數:
+The framework includes extensive visualization capabilities:
 
-## 引用
+```bash
+# Visualize adversarial examples
+python scripts/visualization.py --input_dir ./results/adversarial/pgd_spatial_20240425_120000/images --output_dir ./results/visualizations
+```
 
-如果您使用了HyperForensics++框架，請考慮引用以下論文：
+This will generate:
+- RGB visualizations of original and adversarial images
+- Perturbation visualization with enhanced visibility
+- Prediction difference maps
+- Spectral signature plots for selected pixels
+
+## Best Practices for Repository Management
+
+For sustainable management of this project repository:
+
+1. **Feature Branches**:
+   - Create new branches only for complete features or significant changes
+   - Use naming convention `feature/feature-name` or `fix/issue-description`
+   - Merge to main only after testing
+
+2. **Use .gitignore**:
+   - Exclude generated files and large outputs
+   - Example contents for .gitignore:
+   ```
+   results/adversarial/
+   *.pth
+   *.pt
+   *.npy
+   ```
+
+3. **Git LFS for Large Files**:
+   - For version-controlled large files, use Git Large File Storage
+   - `git lfs install`
+   - `git lfs track "*.pth" "*.npy"`
+
+4. **Version Tagging**:
+   - Tag important versions: `git tag -a v1.0.0 -m "Stable release 1.0.0"`
+   - Push tags: `git push origin --tags`
+
+5. **Clean Commit Messages**:
+   - Format: `[Module] Brief description (under 50 chars)`
+   - Example: `[DeepFool] Fix gradient computation and segmentation model support`
+
+## Citation
+
+If you use the HyperForensics++ framework in your research, please consider citing:
 
 ```
 @article{your_paper,
@@ -195,6 +409,6 @@ ATTACK:
 }
 ```
 
-## 許可證
+## License
 
-本專案採用 MIT 許可證 
+This project is licensed under the MIT License. 
