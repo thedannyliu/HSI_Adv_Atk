@@ -39,6 +39,6 @@ results/adversarial/
 temp/
 
 # Absolute paths - for explicit clarity
-/ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/results/
+# /ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/results/
 /ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/temp/
 /ssd1/dannyliu/HSI_Adv_Atk/HyperForensics++/checkpoints/
