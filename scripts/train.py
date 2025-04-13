@@ -38,7 +38,7 @@ from config.default import CfgNode # 從我們的default.py導入CfgNode
 from utils.metrics import SegMetrics # Using the DFCN metrics class
 from scripts.performance_eval import checkPerformance, load_config_yaml # Import validation function and YAML loader
 
-# --- Loss Functions (Copied/Adapted from DFCN train.py) ---
+# --- Loss Functions (修改以支持組合損失和頻段權重) ---
 class DiceBCELoss(nn.Module):
     # As defined in DFCN train.py
     def __init__(self, weight=None, size_average=True):
@@ -66,6 +66,27 @@ class IoULoss(nn.Module):
         union = total - intersection
         IoU = (intersection + smooth) / (union + smooth)
         return 1 - IoU
+
+# 添加新的組合損失函數
+class CombinedLoss(nn.Module):
+    """
+    結合DiceBCELoss和IoULoss的損失函數
+    
+    Args:
+        dice_weight: DiceBCELoss的權重
+        iou_weight: IoULoss的權重
+    """
+    def __init__(self, dice_weight=0.5, iou_weight=0.5):
+        super(CombinedLoss, self).__init__()
+        self.dice_bce = DiceBCELoss()
+        self.iou = IoULoss()
+        self.dice_weight = dice_weight
+        self.iou_weight = iou_weight
+        
+    def forward(self, inputs, targets, smooth=1):
+        dice_bce_loss = self.dice_bce(inputs, targets, smooth)
+        iou_loss = self.iou(inputs, targets, smooth)
+        return self.dice_weight * dice_bce_loss + self.iou_weight * iou_loss
 
 # Note: BoundaryLoss is complex and wasn't used in DFCN's main loss calculation, 
 # so it's omitted here for simplicity unless specifically requested.
@@ -191,14 +212,23 @@ def main(args):
     elif cfg.TRAIN.LOSS.NAME == "IoULoss":
         criterion = IoULoss()
         print("[INFO] Using IoULoss")
+    elif cfg.TRAIN.LOSS.NAME == "CombinedLoss":
+        # 使用Combined Loss
+        dice_weight = getattr(cfg.TRAIN.LOSS, "DICE_WEIGHT", 0.5)
+        iou_weight = getattr(cfg.TRAIN.LOSS, "IOU_WEIGHT", 0.5)
+        criterion = CombinedLoss(dice_weight=dice_weight, iou_weight=iou_weight)
+        print(f"[INFO] Using CombinedLoss with weights: Dice={dice_weight}, IoU={iou_weight}")
     else:
         raise ValueError(f"Unsupported loss function: {cfg.TRAIN.LOSS.NAME}")
 
     # Auxiliary Loss for Band Prediction (if enabled)
     criterion_aux = None
+    band_reg_weight = 0.1 # 默認值
     if cfg.TRAIN.BAND_REG:
         criterion_aux = nn.BCEWithLogitsLoss() # As used in DFCN
-        print("[INFO] Auxiliary Band Regularization Loss Enabled (BCEWithLogitsLoss)")
+        # 獲取頻段正則化權重，如果未指定則使用默認值
+        band_reg_weight = getattr(cfg.TRAIN, "BAND_REG_WEIGHT", 0.1)
+        print(f"[INFO] Auxiliary Band Regularization Loss Enabled (BCEWithLogitsLoss), weight: {band_reg_weight}")
 
     # Load Checkpoint (If specified)
     start_epoch = cfg.TRAIN.EPOCH_START
@@ -271,7 +301,14 @@ def main(args):
             else:  # 处理其他可能的情况
                 raise ValueError(f"Unexpected dataset return format: {len(data)} items")
             
+            # 標準化輸入
             image = image.to(base_device, dtype=torch.float32)
+            
+            # 確保輸入標準化（如果尚未標準化）
+            # 注意：由於dataset已經進行了標準化，這裡只是一個額外的保障措施
+            if torch.min(image) < -1.1 or torch.max(image) > 1.1:
+                image = 2.0 * (image - image.min()) / (image.max() - image.min() + 1e-8) - 1.0
+                
             label = label.to(base_device, dtype=torch.long) # Mask for main loss
             label2 = label2.to(base_device, dtype=torch.float32) # Band labels for aux loss
             
@@ -285,7 +322,7 @@ def main(args):
             # For CrossEntropy: Input (B, C, H, W), Target (B, H, W) Long
             if isinstance(criterion, nn.CrossEntropyLoss):
                  loss_main = criterion(pred_seg, label)
-            # For Dice/IoU: Input (B, 1, H, W) or (B, H, W) logits, Target (B, H, W) Float
+            # For Dice/IoU/Combined: Input (B, 1, H, W) or (B, H, W) logits, Target (B, H, W) Float
             else:
                  # Assume pred_seg is (B, 2, H, W), need to get class 1 logits/probs
                  # If using BCE-based losses (DiceBCE, IoU), sigmoid is applied inside loss
@@ -301,7 +338,8 @@ def main(args):
             loss_aux = torch.tensor(0.0).to(base_device)
             if cfg.TRAIN.BAND_REG and criterion_aux is not None:
                  loss_aux = criterion_aux(pred_bands, label2)
-                 total_loss = loss_main + loss_aux
+                 # 應用頻段正則化權重
+                 total_loss = loss_main + band_reg_weight * loss_aux
             else:
                  total_loss = loss_main
             

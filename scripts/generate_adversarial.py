@@ -51,7 +51,7 @@ def main():
     
     # 基本配置
     parser.add_argument('--config', type=str, default='config/attack_config.yaml', help='配置檔案路徑')
-    parser.add_argument('--model_path', type=str, default='checkpoints_dfcn/best.pth', help='目標模型路徑')
+    parser.add_argument('--model_path', type=str, default='checkpoints_dfcn_improved/best.pth', help='目標模型路徑')
     parser.add_argument('--model_type', type=str, default='hrnet', help='模型類型')
     parser.add_argument('--batch_size', type=int, default=2, help='批次大小')
     parser.add_argument('--num_workers', type=int, default=4, help='資料載入程序數')
@@ -91,7 +91,7 @@ def main():
     parser.add_argument('--spectral_threshold', type=float, default=0.7, help='光譜重要性閾值，累積重要性高於此值的波段會被選中')
     
     # 評估配置
-    parser.add_argument('--samples', type=int, default=20, help='生成樣本數量')
+    parser.add_argument('--samples', type=int, default=5, help='生成樣本數量')
     parser.add_argument('--visualize', action='store_true', default=True, help='是否可視化結果')
     parser.add_argument('--save_images', action='store_true', default=True, help='是否保存圖像')
     parser.add_argument('--save_perturbations', action='store_true', default=True, help='是否保存擾動')
@@ -645,6 +645,7 @@ def main():
             visualize_adversarial(
                 clean_img, 
                 adv_img, 
+                label=labels_list[i].cpu().numpy(),  # 傳遞標籤作為Ground Truth
                 pred_orig=clean_preds[i].cpu().numpy() if clean_preds.size(0) > i else None, 
                 pred_adv=adv_preds[i].cpu().numpy() if adv_preds.size(0) > i else None,
                 output_path=vis_path

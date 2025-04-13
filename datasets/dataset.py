@@ -260,9 +260,6 @@ class forgeryHSIDataset(Dataset):
         if image.shape != (256, 256, 172):
             raise ValueError(f"{img_path} has shape {image.shape} != (256, 256, 172).")
 
-        # 转置为 [Bands, H, W] => (172, 256, 256)
-        image = image.transpose(2, 0, 1)
-
         # 创建标签 (H, W) = (256, 256)
         trg = np.zeros((256, 256), dtype=np.uint8)
         
@@ -356,16 +353,83 @@ class forgeryHSIDataset(Dataset):
                 trg = np.ones((256, 256), dtype=np.uint8)
                 print(f"找不到 {img_name} 的mask_area信息，将全图标记为伪造")
 
-        # 如果有指定 transform，则应能处理 (image, trg)
-        if self.transform:
-            image, trg = self.transform(image, trg)
+        # 轉置為 [Bands, H, W] => (172, 256, 256)
+        image = image.transpose(2, 0, 1)
 
-        # 转为 Tensor，确保使用 float32 类型
-        image = torch.from_numpy(image.astype(np.float32))
-        trg = torch.from_numpy(trg)
+        # 記錄偽造區域的位置，用於確保隨機裁剪包含偽造區域
+        if np.any(trg == 1):
+            y_indices, x_indices = np.where(trg == 1)
+            y_min, y_max = np.min(y_indices), np.max(y_indices)
+            x_min, x_max = np.min(x_indices), np.max(x_indices)
+        else:
+            y_min, y_max, x_min, x_max = 0, 255, 0, 255
+
+        # 增強數據處理 (類似DFCN_Py)
+        if self.split == 'train':
+            # 隨機裁剪，確保包含偽造區域
+            crop_size = 224  # 裁剪大小
+            
+            # 計算有效的起始位置範圍，確保裁剪區域包含偽造部分
+            max_start_y = min(y_min, 256 - crop_size)
+            min_start_y = max(0, y_max - crop_size)
+            max_start_x = min(x_min, 256 - crop_size)
+            min_start_x = max(0, x_max - crop_size)
+            
+            # 如果範圍有效，則在範圍內隨機選擇起始位置
+            if max_start_y >= min_start_y and max_start_x >= min_start_x:
+                start_y = rn.randint(min_start_y, max_start_y) if min_start_y < max_start_y else min_start_y
+                start_x = rn.randint(min_start_x, max_start_x) if min_start_x < max_start_x else min_start_x
+            else:
+                # 否則隨機裁剪
+                start_y = rn.randint(0, 256 - crop_size)
+                start_x = rn.randint(0, 256 - crop_size)
+            
+            # 執行裁剪
+            image = image[:, start_y:start_y+crop_size, start_x:start_x+crop_size]
+            trg = trg[start_y:start_y+crop_size, start_x:start_x+crop_size]
+            
+            # 隨機水平翻轉
+            if rn.random() > 0.5:
+                image = image[:, :, ::-1].copy()
+                trg = trg[:, ::-1].copy()
+            
+            # 隨機垂直翻轉
+            if rn.random() > 0.5:
+                image = image[:, ::-1, :].copy()
+                trg = trg[::-1, :].copy()
         
-        # 为了与训练循环保持一致，添加一个band label（类似DFCN中的band regularization）
-        # 这里简单用一个全零向量代替，实际应根据需求设定
+        # 標準化圖像
+        image = torch.from_numpy(image.astype(np.float32))
+        
+        # 通過最大最小值標準化到 [-1, 1] 範圍
+        image_min = torch.min(image)
+        image_max = torch.max(image)
+        if image_max > image_min:
+            image = (image - image_min) / (image_max - image_min)
+            image = image * 2 - 1  # 映射到 [-1, 1]
+        
+        trg = torch.from_numpy(trg).long()
+        
+        # 創建頻譜標籤（用於頻段正則化）
         band_label = torch.zeros(172, dtype=torch.float32)
         
+        # 如果是偽造圖像，根據偽造區域生成頻段標籤
+        if config_dir != 'Origin' and torch.any(trg == 1):
+            # 將模型改進為對偽造區域進行頻譜學習
+            # 這裡使用簡單啟發式方法: 檢測每個頻段在偽造區域的平均激活
+            mask = (trg == 1).float()
+            for band_idx in range(image.shape[0]):
+                band = image[band_idx]
+                # 計算該頻段在偽造區域的激活度
+                band_forgery_activation = torch.sum(band * mask) / (torch.sum(mask) + 1e-6)
+                band_normal_activation = torch.sum(band * (1-mask)) / (torch.sum(1-mask) + 1e-6)
+                
+                # 如果偽造區域的激活顯著不同於正常區域，標記為相關頻段
+                if abs(band_forgery_activation - band_normal_activation) > 0.1:
+                    band_label[band_idx] = 1.0
+        
+        # 如果指定了transform，應用它
+        if self.transform:
+            image, trg = self.transform(image, trg)
+            
         return image, trg, band_label 
