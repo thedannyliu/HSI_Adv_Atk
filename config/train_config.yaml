@@ -26,10 +26,10 @@ MODEL:
 
 TRAIN:
   EPOCH_START: 1
-  EPOCH_END: 300 # Target epochs (DFCN used 3000, start with 500)
-  BATCH_SIZE: 2  # Per GPU batch size (DFCN used 16 total) - Adjust based on GPU memory * number of GPUs
-  LEARNING_RATE: 0.0001 # Learning rate (DFCN used 0.001, start lower)
-  WEIGHT_DECAY: 0.00005 # Weight decay from DFCN
+  EPOCH_END: 1000 # 增加訓練輪數到1000輪，與DFCN_Py更接近
+  BATCH_SIZE: 8  # 增加批次大小，如果GPU記憶體允許，可以設置為16
+  LEARNING_RATE: 0.001 # 提高學習率到DFCN_Py使用的0.001
+  WEIGHT_DECAY: 0.00005 # 保持不變，與DFCN一致
   NUM_WORKERS: 8  # DataLoader workers (Adjust based on CPU cores)
   PIN_MEMORY: True
 
@@ -44,9 +44,9 @@ TRAIN:
 
   # Loss Function
   LOSS:
-    NAME: "CrossEntropyLoss" # Options: "CrossEntropyLoss", "DiceBCELoss", "IoULoss"
-    WEIGHTS: [0.01, 0.99] # Class weights for CrossEntropyLoss (DFCN default: high weight for fake class)
-  BAND_REG: False # Enable auxiliary band prediction loss (DFCN default: False)
+    NAME: "DiceBCELoss" # 改為使用DiceBCELoss，DFCN_Py中使用了此損失函數
+    WEIGHTS: [0.01, 0.99] # 保持類別權重不變
+  BAND_REG: True # 啟用頻譜正則化，與DFCN_Py一致
 
   # Optimizer (Only AdamW settings relevant here from DFCN)
   OPTIMIZER:
@@ -56,11 +56,11 @@ TRAIN:
   # Scheduler (MultiStepLR settings from DFCN)
   SCHEDULER:
     NAME: "MultiStepLR"
-    MILESTONES: [200, 350, 450] # Epochs at which to decay LR (Adjust based on EPOCH_END)
+    MILESTONES: [400, 700, 900] # 調整里程碑點，使其更適合1000輪訓練
     GAMMA: 0.1 # LR decay factor
 
 TEST: # Settings used for validation during training
-  BATCH_SIZE: 2 # Validation batch size (can be same as train or larger if memory allows)
+  BATCH_SIZE: 8 # 增加驗證批次大小
   NUM_WORKERS: 4
   # CHECKPOINT: # Not needed here, trainer uses current model
   RESULTS_NUM: 5 # Number of validation images to save per validation run
