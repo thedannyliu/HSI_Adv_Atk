@@ -32,8 +32,8 @@ checkpoints_dfcn/
 
 ## Output and results
 output/
-results/
-results/adversarial/
+# results/
+# results/adversarial/
 
 ## Temporary files
 temp/

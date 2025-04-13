@@ -1,6 +1,6 @@
 # HyperForensics++: A Framework for Hyperspectral Image Forgery Detection and Adversarial Attacks
 
-![Demo Visualization](visualization.png)
+![Demo Visualization](./results/adversarial/pgd_hybrid_20250413_194825/images/sample_0/visualization.png)
 
 ## Overview
 
