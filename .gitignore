@@ -17,6 +17,8 @@
 *.csv
 *.txt
 
+*zip
+
 # Exceptions
 !requirements.txt
 !train_all.txt
